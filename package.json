@@ -1,0 +1,26 @@
+{
+  "name": "bookspace",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Equipment and room booking for a single department.",
+  "engines": {
+    "node": ">=22"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c auto \"npm run dev -w @bookspace/api\" \"npm run dev -w @bookspace/web\"",
+    "build": "npm run build -w @bookspace/web",
+    "start": "npm run start -w @bookspace/api",
+    "typecheck": "npm run typecheck -w @bookspace/shared && npm run typecheck -w @bookspace/api && npm run typecheck -w @bookspace/web",
+    "test": "npm run test -w @bookspace/api && npm run test:restore-guard",
+    "test:restore-guard": "node --test scripts/restore-target.test.mjs",
+    "db:migrate": "npm run db:migrate -w @bookspace/api",
+    "db:seed": "npm run db:seed -w @bookspace/api"
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.0"
+  }
+}
