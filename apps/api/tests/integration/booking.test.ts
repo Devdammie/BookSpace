@@ -10,6 +10,7 @@ import { bookings, resources } from '../../src/db/schema.js';
 import { DEMO_USERS, seedDatabase } from '../../src/seed.js';
 import type pg from 'pg';
 
+loadConfig();
 const hasDatabase = Boolean(process.env.DATABASE_URL);
 const suite = hasDatabase ? describe : describe.skip;
 
@@ -139,5 +140,48 @@ suite('booking flow against Postgres', () => {
     expect(statuses).toEqual([201, 409]);
     const confirmed = await db.select().from(bookings).where(eq(bookings.resourceId, room.id));
     expect(confirmed.filter((row) => row.status === 'CONFIRMED' && row.startTime.getTime() === start.getTime())).toHaveLength(1);
+  });
+
+  it('refuses self-approval and hides another user booking', async () => {
+    const student = await login(DEMO_USERS.student.email, DEMO_USERS.student.password);
+    const lecturer = await login(DEMO_USERS.lecturer.email, DEMO_USERS.lecturer.password);
+    const [lab] = await db.select().from(resources).where(eq(resources.name, 'Computer Lab A'));
+    const start = futureSlot(2, '11:00:00');
+    const created = await student.agent.post('/api/v1/bookings').set('x-csrf-token', student.csrf).send({
+      resourceId: lab.id,
+      startTime: start.toISOString(),
+      endTime: new Date(start.getTime() + 60 * 60 * 1000).toISOString(),
+      purpose: 'Own request',
+    });
+    expect(created.status).toBe(201);
+    const self = await student.agent
+      .post(`/api/v1/bookings/${created.body.data.id}/approve`)
+      .set('x-csrf-token', student.csrf)
+      .send({ version: created.body.data.version });
+    expect(self.status).toBe(403);
+    const hidden = await lecturer.agent.get(`/api/v1/bookings/${created.body.data.id}`);
+    expect(hidden.status).toBe(404);
+  });
+
+  it('AC6 blocks a reservation that overlaps a maintenance closure', async () => {
+    const admin = await login(DEMO_USERS.admin.email, DEMO_USERS.admin.password);
+    const student = await login(DEMO_USERS.student.email, DEMO_USERS.student.password);
+    const [room] = await db.select().from(resources).where(eq(resources.name, 'Seminar Room B'));
+    const start = futureSlot(3, '16:00:00');
+    const end = new Date(start.getTime() + 60 * 60 * 1000);
+    const block = await admin.agent.post(`/api/v1/resources/${room.id}/blocks`).set('x-csrf-token', admin.csrf).send({
+      startTime: start.toISOString(),
+      endTime: end.toISOString(),
+      reason: 'Maintenance window',
+    });
+    expect(block.status).toBe(201);
+    const booking = await student.agent.post('/api/v1/bookings').set('x-csrf-token', student.csrf).send({
+      resourceId: room.id,
+      startTime: start.toISOString(),
+      endTime: end.toISOString(),
+      purpose: 'Should be blocked',
+    });
+    expect(booking.status).toBe(409);
+    expect(booking.body.code).toBe('RESOURCE_BLOCKED');
   });
 });

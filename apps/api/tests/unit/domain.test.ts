@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
+  canCancel,
   canDecide,
+  canEditPending,
+  canViewBooking,
   evaluatePolicy,
   findFreeSlots,
   occupiedEnd,
@@ -74,6 +77,26 @@ describe('permissions', () => {
     expect(canDecide(approver, 'student', ['a'])).toEqual({ ok: true, override: false });
     expect(canDecide(approver, 'student', ['other']).ok).toBe(false);
     expect(canDecide(admin, 'student', [])).toEqual({ ok: true, override: true });
+  });
+
+  it('limits cancel and edit to the owner or an admin, and only for open states', () => {
+    const owner = { id: 'student', roles: ['member'] as const };
+    expect(canCancel(owner, 'student', 'PENDING_APPROVAL')).toBe(true);
+    expect(canCancel(owner, 'student', 'CONFIRMED')).toBe(true);
+    expect(canCancel(owner, 'student', 'REJECTED')).toBe(false);
+    expect(canCancel(approver, 'student', 'CONFIRMED')).toBe(false);
+    expect(canCancel(admin, 'student', 'CONFIRMED')).toBe(true);
+    expect(canEditPending(owner, 'student', 'PENDING_APPROVAL')).toBe(true);
+    expect(canEditPending(owner, 'student', 'CONFIRMED')).toBe(false);
+    expect(canEditPending(approver, 'student', 'PENDING_APPROVAL')).toBe(false);
+  });
+
+  it('hides another member booking from an unassigned approver', () => {
+    const member = { id: 'student', roles: ['member'] as const };
+    expect(canViewBooking(member, 'student', [])).toBe(true);
+    expect(canViewBooking(approver, 'student', ['a'])).toBe(true);
+    expect(canViewBooking(approver, 'student', ['other'])).toBe(false);
+    expect(canViewBooking(admin, 'student', [])).toBe(true);
   });
 });
 
