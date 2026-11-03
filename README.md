@@ -2,7 +2,7 @@
 
 Equipment and room booking for one department. The API is Express, the database is PostgreSQL on Neon through Drizzle, and the interface is a React app.
 
-Docker is not used. Local development talks to a Neon branch.
+Docker is not used. The API is written for Neon. This workspace currently uses a local PostgreSQL 17 cluster on port 5433 so the app can run before Neon URLs are added. Replace `DATABASE_URL` and `DATABASE_URL_UNPOOLED` in `.env` with the Neon pooled and direct URLs when you have them.
 
 ## Setup
 
@@ -13,6 +13,7 @@ Docker is not used. Local development talks to a Neon branch.
 
 ```bash
 npm install
+& "C:\Program Files\PostgreSQL\17\bin\pg_ctl.exe" -D .pgdata -l .pgdata\server.log -o "-p 5433" start
 npm run db:migrate
 npm run db:seed
 npm run dev

@@ -2,9 +2,13 @@ node_modules
 dist
 coverage
 .env
+.env.example
 .env.local
 *.log
 npm-install.log
+install.txt
 playwright-report
 test-results
 .DS_Store
+.pgdata
+.pgpw
