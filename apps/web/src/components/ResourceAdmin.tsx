@@ -1,6 +1,6 @@
 import { getZonedParts, zonedTimeToUtc } from '@bookspace/shared';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, errorText } from '../lib/api';
 import { formatWhen } from '../lib/format';
 
@@ -9,6 +9,10 @@ type Block = { id: string; startTime: string; endTime: string; reason: string };
 type UserRow = { id: string; fullName: string; roles: string[]; isActive: boolean };
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+function normalizeHours(hours: Hour[]) {
+  return hours.map((hour) => ({ ...hour, openTime: hour.openTime.slice(0, 5), closeTime: hour.closeTime.slice(0, 5) }));
+}
 
 export function ResourceAdmin({
   resourceId,
@@ -28,9 +32,7 @@ export function ResourceAdmin({
   const client = useQueryClient();
   const [message, setMessage] = useState('');
   const [nextStatus, setNextStatus] = useState(status);
-  const [draftHours, setDraftHours] = useState(
-    hours.map((hour) => ({ ...hour, openTime: hour.openTime.slice(0, 5), closeTime: hour.closeTime.slice(0, 5) })),
-  );
+  const [draftHours, setDraftHours] = useState(() => normalizeHours(hours));
   const [block, setBlock] = useState({ date: getZonedParts(new Date(), timeZone).dateKey, start: '12:00', end: '13:00', reason: '' });
   const users = useQuery({
     queryKey: ['admin-users'],
@@ -38,6 +40,12 @@ export function ResourceAdmin({
   });
   const staff = users.data?.data.filter((user) => user.isActive && (user.roles.includes('approver') || user.roles.includes('admin'))) ?? [];
   const [selected, setSelected] = useState(approverIds);
+
+  useEffect(() => {
+    setNextStatus(status);
+    setDraftHours(normalizeHours(hours));
+    setSelected(approverIds);
+  }, [status, hours, approverIds]);
 
   async function save(task: () => Promise<unknown>, success: string) {
     try {
