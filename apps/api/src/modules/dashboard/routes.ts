@@ -1,11 +1,11 @@
 import { and, eq, gte, sql } from 'drizzle-orm';
 import { Router } from 'express';
-import type { AppConfig } from '../config.js';
-import type { Database } from '../db/client.js';
-import { bookings } from '../db/schema.js';
-import { asyncRoute } from '../http/async.js';
-import { actorOf, requireAuth } from '../middleware/auth.js';
-import { createBookingService } from '../modules/bookings/service.js';
+import type { AppConfig } from '../../config.js';
+import type { Database } from '../../db/client.js';
+import { bookings } from '../../db/schema.js';
+import { asyncRoute } from '../../http/async.js';
+import { actorOf, requireAuth } from '../../middleware/auth.js';
+import { createBookingService } from '../bookings/service.js';
 
 export function createDashboardRouter(db: Database, config: AppConfig) {
   const router = Router();

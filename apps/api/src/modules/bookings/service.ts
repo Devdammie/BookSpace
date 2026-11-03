@@ -14,8 +14,8 @@ import {
   type BookingStatus,
 } from '@bookspace/shared';
 import { and, asc, desc, eq, lte, ne, or, sql } from 'drizzle-orm';
-import type { AppConfig } from '../config.js';
-import type { Database } from '../db/client.js';
+import type { AppConfig } from '../../config.js';
+import type { Database } from '../../db/client.js';
 import {
   approvals,
   auditLog,
@@ -28,12 +28,10 @@ import {
   resourceHours,
   resources,
   users,
-} from '../db/schema.js';
-import { isSlotConflict, pgCode, ProblemError } from '../http/errors.js';
-import { getDepartmentSettings } from '../settings.js';
-import type { Actor, BookingDto } from '../types.js';
-
-type Slot = { startTime: string; endTime: string };
+} from '../../db/schema.js';
+import { isSlotConflict, pgCode, ProblemError } from '../../http/errors.js';
+import { getDepartmentSettings } from '../../settings.js';
+import type { Actor, BookingDto } from '../../types.js';
 
 function hashRequest(input: { resourceId: string; startTime: string; endTime: string; purpose: string }) {
   return createHash('sha256').update(JSON.stringify(input)).digest('hex');

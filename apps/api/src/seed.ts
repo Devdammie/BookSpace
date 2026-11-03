@@ -1,8 +1,11 @@
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { eq, sql } from 'drizzle-orm';
 import { addDays, getZonedParts, zonedTimeToUtc } from '@bookspace/shared';
 import { loadConfig } from './config.js';
 import { createDatabase, type Database } from './db/client.js';
 import {
+  bookings,
   resourceApprovers,
   resourceBlocks,
   resourceHours,
@@ -183,7 +186,7 @@ export async function seedDatabase(db: Database) {
     mustChangePassword: false,
     isActive: true,
   };
-  const existingBookings = await db.select({ id: sql<string>`id` }).from(sql`bookings`).limit(1);
+  const existingBookings = await db.select({ id: bookings.id }).from(bookings).limit(1);
   if (existingBookings.length === 0) {
     const seminarStart = nextWeekday(config.timezone, 3, '09:00:00');
     await service.create(actor, {
@@ -202,7 +205,7 @@ export async function seedDatabase(db: Database) {
   }
 }
 
-const isDirect = process.argv[1] && process.argv[1].endsWith('seed.ts');
+const isDirect = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
 if (isDirect) {
   const config = loadConfig();
   if (!config.databaseUrl) {
