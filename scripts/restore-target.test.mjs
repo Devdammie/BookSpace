@@ -14,3 +14,9 @@ test('allows a direct URL only when the operator confirms', () => {
   assert.equal(canRunRestore(url, 'no'), false);
   assert.equal(canRunRestore(url, 'yes'), true);
 });
+
+test('allows a local direct URL without sslmode', () => {
+  const url = 'postgresql://bookspace:secret@localhost:5433/bookspace';
+  assert.equal(classifyDatabaseUrl(url), 'direct');
+  assert.equal(canRunRestore(url, 'yes'), true);
+});

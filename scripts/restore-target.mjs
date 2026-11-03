@@ -1,7 +1,8 @@
 export function classifyDatabaseUrl(url) {
   if (!url) return 'missing';
   if (url.includes('-pooler')) return 'pooled';
-  if (!url.includes('sslmode=require')) return 'insecure';
+  const local = /localhost|127\.0\.0\.1/.test(url);
+  if (!local && !url.includes('sslmode=require')) return 'insecure';
   return 'direct';
 }
 
