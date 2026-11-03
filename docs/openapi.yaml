@@ -1,0 +1,388 @@
+openapi: 3.0.3
+info:
+  title: BookSpace API
+  version: 0.1.0
+  description: Equipment and room booking for one department.
+servers:
+  - url: /api/v1
+paths:
+  /auth/login:
+    post:
+      summary: Sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Login'
+      responses:
+        '200':
+          description: Session established
+        '401':
+          description: Invalid credentials
+  /auth/logout:
+    post:
+      summary: Sign out
+      responses:
+        '200':
+          description: Session destroyed
+  /auth/csrf:
+    get:
+      summary: Current CSRF token
+      responses:
+        '200':
+          description: CSRF token
+  /auth/change-password:
+    post:
+      summary: Change password
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePassword'
+      responses:
+        '200':
+          description: Password updated
+  /users/me:
+    get:
+      summary: Current user
+      responses:
+        '200':
+          description: Profile
+    patch:
+      summary: Update own name
+      responses:
+        '200':
+          description: Updated
+  /users:
+    get:
+      summary: List users
+      responses:
+        '200':
+          description: User list
+    post:
+      summary: Provision account
+      responses:
+        '201':
+          description: Created with temporary password
+  /resources:
+    get:
+      summary: List resources
+      parameters:
+        - in: query
+          name: kind
+          schema:
+            type: string
+            enum: [room, equipment]
+        - in: query
+          name: q
+          schema:
+            type: string
+        - in: query
+          name: location
+          schema:
+            type: string
+        - in: query
+          name: availableFrom
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: availableTo
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Resource catalogue
+    post:
+      summary: Create resource
+      responses:
+        '201':
+          description: Created
+  /resources/{id}:
+    get:
+      summary: Resource detail
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Resource with hours, blocks, and approvers
+    patch:
+      summary: Update resource
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Updated
+  /resources/{id}/availability:
+    get:
+      summary: Availability window
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - in: query
+          name: from
+          required: true
+          schema:
+            type: string
+            format: date-time
+        - in: query
+          name: to
+          required: true
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Bookings and blocks in range
+  /resources/{id}/hours:
+    put:
+      summary: Replace opening hours
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Hours replaced
+  /resources/{id}/blocks:
+    post:
+      summary: Create maintenance block
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '201':
+          description: Block created
+        '409':
+          description: Confirmed bookings overlap the closure
+  /resources/{id}/blocks/{blockId}:
+    delete:
+      summary: Remove maintenance block
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - in: path
+          name: blockId
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Block removed
+  /resources/{id}/approvers:
+    put:
+      summary: Replace approvers
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Approvers replaced
+  /bookings:
+    get:
+      summary: List bookings
+      parameters:
+        - in: query
+          name: scope
+          schema:
+            type: string
+            enum: [mine, queue, all]
+      responses:
+        '200':
+          description: Booking list
+    post:
+      summary: Create booking or request
+      parameters:
+        - in: header
+          name: Idempotency-Key
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateBooking'
+      responses:
+        '201':
+          description: Created
+        '409':
+          description: Slot conflict
+  /bookings/{id}:
+    get:
+      summary: Booking detail
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Booking
+    patch:
+      summary: Edit pending booking
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Updated
+  /bookings/{id}/cancel:
+    post:
+      summary: Cancel booking
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Cancelled
+  /bookings/{id}/approve:
+    post:
+      summary: Approve and confirm
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Confirmed
+        '409':
+          description: Conflict or invalid transition
+  /bookings/{id}/reject:
+    post:
+      summary: Reject request
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Rejected
+  /bookings/{id}/reschedule:
+    post:
+      summary: Admin reschedule of a confirmed booking
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Rescheduled
+  /bookings/{id}/events:
+    get:
+      summary: Booking history
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Events
+  /approvals:
+    get:
+      summary: Approval queue
+      responses:
+        '200':
+          description: Pending requests
+  /notifications:
+    get:
+      summary: Notifications
+      responses:
+        '200':
+          description: Notification list
+  /notifications/read-all:
+    post:
+      summary: Mark all notifications read
+      responses:
+        '200':
+          description: Updated
+  /notifications/{id}/read:
+    post:
+      summary: Mark one notification read
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Updated
+  /dashboard:
+    get:
+      summary: Member dashboard
+      responses:
+        '200':
+          description: Dashboard metrics
+  /admin/dashboard:
+    get:
+      summary: Admin dashboard
+      responses:
+        '200':
+          description: Admin metrics
+  /admin/reports/bookings:
+    get:
+      summary: Booking report
+      responses:
+        '200':
+          description: Rows
+  /admin/reports/bookings.csv:
+    get:
+      summary: Booking report CSV
+      responses:
+        '200':
+          description: CSV download
+  /admin/audit:
+    get:
+      summary: Audit log
+      responses:
+        '200':
+          description: Audit rows
+  /admin/settings:
+    get:
+      summary: Department settings
+      responses:
+        '200':
+          description: Settings
+    patch:
+      summary: Update department settings
+      responses:
+        '200':
+          description: Updated
+components:
+  parameters:
+    Id:
+      in: path
+      name: id
+      required: true
+      schema:
+        type: string
+        format: uuid
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: bookspace.sid
+    csrfHeader:
+      type: apiKey
+      in: header
+      name: x-csrf-token
+  schemas:
+    Login:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+    ChangePassword:
+      type: object
+      required: [currentPassword, newPassword]
+      properties:
+        currentPassword:
+          type: string
+        newPassword:
+          type: string
+          minLength: 10
+    CreateBooking:
+      type: object
+      required: [resourceId, startTime, endTime, purpose]
+      properties:
+        resourceId:
+          type: string
+          format: uuid
+        startTime:
+          type: string
+          format: date-time
+        endTime:
+          type: string
+          format: date-time
+        purpose:
+          type: string
+security:
+  - sessionCookie: []
+    csrfHeader: []

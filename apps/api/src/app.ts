@@ -41,6 +41,14 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
   app.get('/health', (_req, res) => {
     res.json({ data: { status: 'ok' } });
   });
+  app.get('/openapi.yaml', (_req, res) => {
+    const openapi = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../../docs/openapi.yaml');
+    if (!existsSync(openapi)) {
+      res.status(404).json({ type: 'about:blank', title: 'Not Found', status: 404, code: 'NOT_FOUND', detail: 'OpenAPI document is missing.' });
+      return;
+    }
+    res.type('text/yaml').sendFile(openapi);
+  });
   app.get('/ready', async (_req, res) => {
     try {
       await pool.query('select 1');
