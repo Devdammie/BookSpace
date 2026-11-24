@@ -160,6 +160,27 @@ describe('policy and time', () => {
       '2026-11-02T20:00:00.000Z',
     ]);
   });
+
+  it('keeps buffer minutes out of suggested slots', () => {
+    const busy = {
+      start: zonedTimeToUtc('2026-11-02', '10:00:00', 'America/Los_Angeles'),
+      end: zonedTimeToUtc('2026-11-02', '11:00:00', 'America/Los_Angeles'),
+    };
+    const slots = findFreeSlots({
+      dateKey: '2026-11-02',
+      timeZone: 'America/Los_Angeles',
+      openTime: '08:00',
+      closeTime: '12:00',
+      durationMinutes: 60,
+      stepMinutes: 15,
+      busy: [busy],
+      bufferMinutes: 15,
+      preferAround: zonedTimeToUtc('2026-11-02', '09:00:00', 'America/Los_Angeles'),
+      limit: 5,
+    });
+    expect(slots.some((slot) => slot.start.toISOString() === '2026-11-02T17:00:00.000Z')).toBe(false);
+    expect(slots.some((slot) => slot.end.toISOString() === '2026-11-02T18:00:00.000Z')).toBe(false);
+  });
 });
 
 describe('utilization', () => {

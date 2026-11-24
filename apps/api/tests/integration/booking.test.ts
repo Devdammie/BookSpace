@@ -48,7 +48,7 @@ suite('booking flow against Postgres', () => {
 
   async function login(email: string, password: string) {
     const agent = request.agent(app);
-    const response = await agent.post('/api/v1/auth/login').send({ email, password });
+    const response = await agent.post('/api/v1/auth/login').send({ email, password, departmentSlug: 'demo' });
     expect(response.status).toBe(200);
     return { agent, csrf: response.body.data.csrfToken as string };
   }
