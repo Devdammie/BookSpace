@@ -29,7 +29,12 @@ type ResourceDetail = {
     approvalRequired: boolean;
     minMinutes: number;
     maxMinutes: number;
+    maxAdvanceDays: number;
     bufferMinutes: number;
+    assetTag: string | null;
+    serialNo: string | null;
+    parentResourceId: string | null;
+    allowedUserTypes: string[];
     status: string;
     hours: { weekday: number; openTime: string; closeTime: string }[];
     blocks: { id: string; startTime: string; endTime: string; reason: string }[];
@@ -161,7 +166,22 @@ export function ResourceDetailPage() {
         <ResourceAdmin
           key={data.id}
           resourceId={data.id}
-          status={data.status}
+          details={{
+            name: data.name,
+            description: data.description,
+            location: data.location,
+            capacity: data.capacity,
+            approvalRequired: data.approvalRequired,
+            minMinutes: data.minMinutes,
+            maxMinutes: data.maxMinutes,
+            maxAdvanceDays: data.maxAdvanceDays,
+            bufferMinutes: data.bufferMinutes,
+            assetTag: data.assetTag,
+            serialNo: data.serialNo,
+            parentResourceId: data.parentResourceId,
+            allowedUserTypes: data.allowedUserTypes ?? [],
+            status: data.status,
+          }}
           hours={data.hours}
           blocks={data.blocks ?? []}
           approverIds={data.approverIds ?? []}
