@@ -1,27 +1,53 @@
+import { eq } from 'drizzle-orm';
 import type { Database } from './db/client.js';
-import { settings } from './db/schema.js';
+import { departments } from './db/schema.js';
+import { ProblemError } from './http/errors.js';
+import type { Tenant } from './types.js';
 
-export async function getDepartmentSettings(db: Database, fallbackTimezone: string) {
-  const rows = await db.select().from(settings);
-  const timezoneRow = rows.find((row) => row.key === 'timezone');
-  const expiryRow = rows.find((row) => row.key === 'pending_expiry_hours');
-  const timezone = typeof timezoneRow?.value === 'string' ? timezoneRow.value : fallbackTimezone;
-  const pendingExpiryHours = typeof expiryRow?.value === 'number' ? expiryRow.value : 48;
-  return { timezone, pendingExpiryHours };
+export async function getDepartmentById(db: Database, departmentId: string): Promise<Tenant> {
+  const [row] = await db.select().from(departments).where(eq(departments.id, departmentId));
+  if (!row || !row.isActive) throw new ProblemError(404, 'NOT_FOUND', 'Department not found.');
+  return toTenant(row);
+}
+
+export async function getDepartmentBySlug(db: Database, slug: string): Promise<Tenant> {
+  const [row] = await db.select().from(departments).where(eq(departments.slug, slug.toLowerCase()));
+  if (!row || !row.isActive) throw new ProblemError(404, 'NOT_FOUND', 'Department not found.');
+  return toTenant(row);
+}
+
+export async function getDepartmentSettings(db: Database, departmentId: string) {
+  const department = await getDepartmentById(db, departmentId);
+  return {
+    timezone: department.timezone,
+    pendingExpiryHours: department.pendingExpiryHours,
+  };
 }
 
 export async function saveDepartmentSettings(
   db: Database,
+  departmentId: string,
   value: { timezone: string; pendingExpiryHours: number },
 ) {
-  const pairs: { key: string; value: string | number }[] = [
-    { key: 'timezone', value: value.timezone },
-    { key: 'pending_expiry_hours', value: value.pendingExpiryHours },
-  ];
-  for (const pair of pairs) {
-    await db
-      .insert(settings)
-      .values(pair)
-      .onConflictDoUpdate({ target: settings.key, set: { value: pair.value } });
-  }
+  const [updated] = await db
+    .update(departments)
+    .set({
+      timezone: value.timezone,
+      pendingExpiryHours: value.pendingExpiryHours,
+    })
+    .where(eq(departments.id, departmentId))
+    .returning();
+  if (!updated) throw new ProblemError(404, 'NOT_FOUND', 'Department not found.');
+  return toTenant(updated);
+}
+
+function toTenant(row: typeof departments.$inferSelect): Tenant {
+  return {
+    id: row.id,
+    name: row.name,
+    slug: row.slug,
+    timezone: row.timezone,
+    pendingExpiryHours: row.pendingExpiryHours,
+    isActive: row.isActive,
+  };
 }

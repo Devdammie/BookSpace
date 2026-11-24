@@ -38,6 +38,24 @@ export const bookingStatusEnum = pgEnum('booking_status', [
 ]);
 export const approvalDecisionEnum = pgEnum('approval_decision', ['approved', 'rejected']);
 
+export const departments = pgTable(
+  'departments',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    name: text('name').notNull(),
+    slug: text('slug').notNull(),
+    timezone: text('timezone').notNull().default('America/Los_Angeles'),
+    pendingExpiryHours: integer('pending_expiry_hours').notNull().default(48),
+    isActive: boolean('is_active').notNull().default(true),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (table) => [
+    uniqueIndex('departments_slug_idx').on(table.slug),
+    check('departments_slug_format', sql`${table.slug} ~ '^[a-z0-9]+(?:-[a-z0-9]+)*$'`),
+    check('departments_pending_expiry', sql`${table.pendingExpiryHours} BETWEEN 1 AND 168`),
+  ],
+);
+
 export const roles = pgTable('roles', {
   id: text('id').primaryKey(),
   description: text('description').notNull(),
@@ -47,6 +65,9 @@ export const users = pgTable(
   'users',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
     email: text('email').notNull(),
     passwordHash: text('password_hash').notNull(),
     fullName: text('full_name').notNull(),
@@ -57,7 +78,10 @@ export const users = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
-  (table) => [uniqueIndex('users_email_lower_idx').on(sql`lower(${table.email})`)],
+  (table) => [
+    uniqueIndex('users_email_lower_idx').on(sql`lower(${table.email})`),
+    index('users_department_idx').on(table.departmentId),
+  ],
 );
 
 export const userRoles = pgTable(
@@ -77,6 +101,9 @@ export const resources = pgTable(
   'resources',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
     kind: resourceKindEnum('kind').notNull(),
     name: text('name').notNull(),
     description: text('description').notNull().default(''),
@@ -98,6 +125,7 @@ export const resources = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
+    index('resources_department_idx').on(table.departmentId),
     check('resources_capacity_positive', sql`${table.capacity} > 0`),
     check('resources_duration_positive', sql`${table.minMinutes} > 0 AND ${table.maxMinutes} >= ${table.minMinutes}`),
     check('resources_advance_nonnegative', sql`${table.maxAdvanceDays} >= 0`),
@@ -161,6 +189,9 @@ export const bookings = pgTable(
   'bookings',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id),
@@ -177,6 +208,7 @@ export const bookings = pgTable(
     updatedAt: timestamp('updated_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
   (table) => [
+    index('bookings_department_idx').on(table.departmentId),
     index('bookings_resource_start_idx').on(table.resourceId, table.startTime),
     index('bookings_user_start_idx').on(table.userId, table.startTime),
     index('bookings_pending_idx')
@@ -225,6 +257,9 @@ export const auditLog = pgTable(
   'audit_log',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
     actorId: uuid('actor_id').references(() => users.id),
     action: text('action').notNull(),
     targetType: text('target_type').notNull(),
@@ -232,13 +267,19 @@ export const auditLog = pgTable(
     details: jsonb('details').notNull().default({}),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
-  (table) => [index('audit_log_created_idx').on(table.createdAt)],
+  (table) => [
+    index('audit_log_created_idx').on(table.createdAt),
+    index('audit_log_department_idx').on(table.departmentId),
+  ],
 );
 
 export const notifications = pgTable(
   'notifications',
   {
     id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
     userId: uuid('user_id')
       .notNull()
       .references(() => users.id),
@@ -247,24 +288,29 @@ export const notifications = pgTable(
     readAt: timestamp('read_at', { withTimezone: true, mode: 'date' }),
     createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
   },
-  (table) => [index('notifications_user_read_idx').on(table.userId, table.readAt)],
+  (table) => [
+    index('notifications_user_read_idx').on(table.userId, table.readAt),
+    index('notifications_department_idx').on(table.departmentId),
+  ],
 );
 
-export const idempotencyKeys = pgTable('idempotency_keys', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  userId: uuid('user_id')
-    .notNull()
-    .references(() => users.id),
-  key: text('key').notNull(),
-  requestHash: text('request_hash').notNull(),
-  responseBody: jsonb('response_body').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
-});
-
-export const settings = pgTable('settings', {
-  key: text('key').primaryKey(),
-  value: jsonb('value').notNull(),
-});
+export const idempotencyKeys = pgTable(
+  'idempotency_keys',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    departmentId: uuid('department_id')
+      .notNull()
+      .references(() => departments.id),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id),
+    key: text('key').notNull(),
+    requestHash: text('request_hash').notNull(),
+    responseBody: jsonb('response_body').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true, mode: 'date' }).notNull().defaultNow(),
+  },
+  (table) => [index('idempotency_keys_department_idx').on(table.departmentId)],
+);
 
 export const sessions = pgTable('session', {
   sid: varchar('sid').primaryKey(),

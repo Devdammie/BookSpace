@@ -2,7 +2,7 @@
   "name": "bookspace",
   "private": true,
   "version": "0.1.0",
-  "description": "Equipment and room booking for a single department.",
+  "description": "Multi-tenant equipment and room booking for university departments.",
   "engines": {
     "node": ">=22"
   },
