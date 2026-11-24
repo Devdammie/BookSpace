@@ -10,6 +10,8 @@ export type CurrentUser = {
   roles: Array<'member' | 'approver' | 'admin'>;
   mustChangePassword: boolean;
   timezone: string;
+  departmentId: string;
+  departmentSlug: string;
 };
 
 type AuthState = {

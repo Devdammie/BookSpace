@@ -1,15 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
 import { api, errorText } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { formatWhen } from '../lib/format';
+import { orgPath } from '../lib/paths';
 
 type Row = { id: string; resourceName: string; startTime: string; endTime: string; status: string; purpose: string };
 
 export function BookingsPage() {
   const auth = useAuth();
+  const { slug = auth.user?.departmentSlug ?? '' } = useParams();
   const [status, setStatus] = useState('');
   const query = useQuery({
     queryKey: ['bookings', status],
@@ -36,7 +38,7 @@ export function BookingsPage() {
           <tbody>
             {query.data?.data.map((row) => (
               <tr key={row.id}>
-                <td><Link to={`/bookings/${row.id}`}>{row.resourceName}</Link></td>
+                <td><Link to={orgPath(slug, `/bookings/${row.id}`)}>{row.resourceName}</Link></td>
                 <td>{formatWhen(row.startTime, auth.user!.timezone)}</td>
                 <td><StatusBadge status={row.status} /></td>
                 <td>{row.purpose}</td>

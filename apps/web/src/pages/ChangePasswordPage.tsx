@@ -1,25 +1,45 @@
 import { passwordSchema } from '@bookspace/shared';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { useForm } from 'react-hook-form';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { z } from 'zod';
 import { api, errorText } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { orgPath } from '../lib/paths';
 
-const schema = z.object({ currentPassword: z.string().min(1), newPassword: passwordSchema });
+const schema = z
+  .object({
+    currentPassword: z.string().min(1),
+    newPassword: passwordSchema,
+    confirmPassword: z.string().min(1),
+  })
+  .refine((value) => value.newPassword === value.confirmPassword, {
+    message: 'Passwords must match',
+    path: ['confirmPassword'],
+  });
 
 export function ChangePasswordPage() {
   const auth = useAuth();
   const navigate = useNavigate();
-  const form = useForm({ resolver: zodResolver(schema), defaultValues: { currentPassword: '', newPassword: '' } });
+  const { slug = auth.user?.departmentSlug ?? '' } = useParams();
+  const form = useForm({
+    resolver: zodResolver(schema),
+    defaultValues: { currentPassword: '', newPassword: '', confirmPassword: '' },
+  });
   return (
     <form
       className="panel form"
       onSubmit={form.handleSubmit(async (values) => {
         try {
-          await api('/api/v1/auth/change-password', { method: 'POST', body: JSON.stringify(values) });
+          await api('/api/v1/auth/change-password', {
+            method: 'POST',
+            body: JSON.stringify({
+              currentPassword: values.currentPassword,
+              newPassword: values.newPassword,
+            }),
+          });
           await auth.refresh();
-          navigate('/');
+          navigate(orgPath(slug));
         } catch (error) {
           form.setError('root', { message: errorText(error) });
         }
@@ -35,9 +55,35 @@ export function ChangePasswordPage() {
         New password
         <input type="password" autoComplete="new-password" {...form.register('newPassword')} />
       </label>
+      <label>
+        Confirm new password
+        <input type="password" autoComplete="new-password" {...form.register('confirmPassword')} />
+      </label>
       {form.formState.errors.newPassword && <p className="alert">{form.formState.errors.newPassword.message}</p>}
-      {form.formState.errors.root && <p className="alert" role="alert">{form.formState.errors.root.message}</p>}
-      <button className="button" type="submit" disabled={form.formState.isSubmitting}>Save password</button>
+      {form.formState.errors.confirmPassword && (
+        <p className="alert">{form.formState.errors.confirmPassword.message}</p>
+      )}
+      {form.formState.errors.root && (
+        <p className="alert" role="alert">
+          {form.formState.errors.root.message}
+        </p>
+      )}
+      <div className="inline">
+        <button className="button" type="submit" disabled={form.formState.isSubmitting}>
+          Save password
+        </button>
+        <button
+          className="button secondary"
+          type="button"
+          onClick={async () => {
+            await api('/api/v1/auth/logout', { method: 'POST' });
+            await auth.refresh();
+            navigate(orgPath(slug, '/login'));
+          }}
+        >
+          Sign out
+        </button>
+      </div>
     </form>
   );
 }

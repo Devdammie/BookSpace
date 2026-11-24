@@ -1,9 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { StatusBadge } from '../components/StatusBadge';
 import { api, errorText } from '../lib/api';
 import { useAuth } from '../lib/auth';
 import { formatWhen } from '../lib/format';
+import { orgPath } from '../lib/paths';
 
 type Dashboard = {
   data: {
@@ -15,6 +16,7 @@ type Dashboard = {
 
 export function DashboardPage() {
   const auth = useAuth();
+  const { slug = auth.user?.departmentSlug ?? '' } = useParams();
   const query = useQuery({ queryKey: ['dashboard'], queryFn: () => api<Dashboard>('/api/v1/dashboard') });
   const admin = useQuery({
     queryKey: ['admin-dashboard'],
@@ -31,7 +33,7 @@ export function DashboardPage() {
           <h1>Hello, {auth.user?.fullName.split(' ')[0]}</h1>
           <p className="muted">Times are shown in {auth.user?.timezone}.</p>
         </div>
-        <Link className="button" to="/resources">Find a resource</Link>
+        <Link className="button" to={orgPath(slug, '/resources')}>Find a resource</Link>
       </div>
       <div className="metrics">
         <div className="card metric"><b>{data.pending}</b><span>Pending requests</span></div>
@@ -49,7 +51,7 @@ export function DashboardPage() {
         <ul>
           {data.upcoming.map((item) => (
             <li key={item.id}>
-              <Link to={`/bookings/${item.id}`}>{item.purpose}</Link> · {formatWhen(item.startTime, auth.user!.timezone)} · <StatusBadge status={item.status} />
+              <Link to={orgPath(slug, `/bookings/${item.id}`)}>{item.purpose}</Link> · {formatWhen(item.startTime, auth.user!.timezone)} · <StatusBadge status={item.status} />
             </li>
           ))}
         </ul>
@@ -60,7 +62,7 @@ export function DashboardPage() {
         <ul>
           {data.recent.map((item) => (
             <li key={item.id}>
-              <Link to={`/bookings/${item.id}`}>{item.resourceName}</Link> · {item.purpose} · <StatusBadge status={item.status} />
+              <Link to={orgPath(slug, `/bookings/${item.id}`)}>{item.resourceName}</Link> · {item.purpose} · <StatusBadge status={item.status} />
             </li>
           ))}
         </ul>

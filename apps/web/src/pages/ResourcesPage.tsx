@@ -1,7 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 import { api, errorText } from '../lib/api';
+import { useAuth } from '../lib/auth';
+import { orgPath } from '../lib/paths';
 
 type Resource = {
   id: string;
@@ -14,6 +16,8 @@ type Resource = {
 };
 
 export function ResourcesPage() {
+  const auth = useAuth();
+  const { slug = auth.user?.departmentSlug ?? '' } = useParams();
   const [kind, setKind] = useState('');
   const [q, setQ] = useState('');
   const [location, setLocation] = useState('');
@@ -57,7 +61,7 @@ export function ResourcesPage() {
             <h2>{resource.name}</h2>
             <p>{resource.kind} · {resource.location}</p>
             <p>Capacity {resource.capacity}. {resource.approvalRequired ? 'Approval required.' : 'Confirms immediately.'}</p>
-            <Link className="button" to={`/resources/${resource.id}`}>View availability</Link>
+            <Link className="button" to={orgPath(slug, `/resources/${resource.id}`)}>View availability</Link>
           </article>
         ))}
       </div>
