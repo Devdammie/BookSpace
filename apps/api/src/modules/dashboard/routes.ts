@@ -19,13 +19,26 @@ export function createDashboardRouter(db: Database, config: AppConfig) {
       const upcoming = await db
         .select({ id: bookings.id, startTime: bookings.startTime, endTime: bookings.endTime, status: bookings.status, purpose: bookings.purpose })
         .from(bookings)
-        .where(and(eq(bookings.userId, actor.id), eq(bookings.status, 'CONFIRMED'), gte(bookings.startTime, new Date())))
+        .where(
+          and(
+            eq(bookings.departmentId, actor.departmentId),
+            eq(bookings.userId, actor.id),
+            eq(bookings.status, 'CONFIRMED'),
+            gte(bookings.startTime, new Date()),
+          ),
+        )
         .orderBy(bookings.startTime)
         .limit(5);
       const [pending] = await db
         .select({ count: sql<number>`count(*)::int` })
         .from(bookings)
-        .where(and(eq(bookings.userId, actor.id), eq(bookings.status, 'PENDING_APPROVAL')));
+        .where(
+          and(
+            eq(bookings.departmentId, actor.departmentId),
+            eq(bookings.userId, actor.id),
+            eq(bookings.status, 'PENDING_APPROVAL'),
+          ),
+        );
       res.json({
         data: {
           upcoming: upcoming.map((row) => ({ ...row, startTime: row.startTime.toISOString(), endTime: row.endTime.toISOString() })),

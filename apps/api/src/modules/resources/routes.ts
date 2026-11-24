@@ -55,7 +55,7 @@ function windowsConflict(hours: { weekday: number; openTime: string; closeTime: 
   return false;
 }
 
-export function createResourceRouter(db: Database, config: AppConfig) {
+export function createResourceRouter(db: Database, _config: AppConfig) {
   const router = Router();
   const auth = requireAuth(db);
   const admin = [auth, requireRole('admin')] as const;
@@ -66,7 +66,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     asyncRoute(async (req, res) => {
       const query = parseOrThrow(listResourcesSchema, req.query);
       const actor = actorOf(req);
-      const filters = [];
+      const filters = [eq(resources.departmentId, actor.departmentId)];
       if (query.kind) filters.push(eq(resources.kind, query.kind));
       if (query.location) filters.push(eq(resources.location, query.location));
       if (query.capacityMin) filters.push(gte(resources.capacity, query.capacityMin));
@@ -87,6 +87,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         filters.push(sql`not exists (
           select 1 from bookings
           where bookings.resource_id = ${resources.id}
+            and bookings.department_id = ${actor.departmentId}
             and bookings.status = 'CONFIRMED'
             and bookings.blocked_range && tstzrange(${from.toISOString()}::timestamptz, ${to.toISOString()}::timestamptz, '[)')
         )`);
@@ -109,7 +110,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
       const locations = await db
         .selectDistinct({ location: resources.location })
         .from(resources)
-        .where(eq(resources.status, 'active'))
+        .where(and(eq(resources.departmentId, actor.departmentId), eq(resources.status, 'active')))
         .orderBy(asc(resources.location));
       res.json({
         data: rows,
@@ -126,12 +127,24 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(createResourceSchema, req.body);
+      const actor = actorOf(req);
       if (body.maxMinutes < body.minMinutes) {
         throw new ProblemError(400, 'VALIDATION_ERROR', 'Maximum duration must be at least the minimum.');
       }
-      const [created] = await db.insert(resources).values(body).returning();
+      if (body.parentResourceId) {
+        const [parent] = await db
+          .select({ id: resources.id })
+          .from(resources)
+          .where(and(eq(resources.id, body.parentResourceId), eq(resources.departmentId, actor.departmentId)));
+        if (!parent) throw new ProblemError(400, 'VALIDATION_ERROR', 'Parent resource must belong to this department.');
+      }
+      const [created] = await db
+        .insert(resources)
+        .values({ ...body, departmentId: actor.departmentId })
+        .returning();
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'resource.created',
         targetType: 'resource',
         targetId: created.id,
@@ -150,7 +163,10 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         req.query,
       );
       const actor = actorOf(req);
-      const [resource] = await db.select().from(resources).where(eq(resources.id, String(req.params.id)));
+      const [resource] = await db
+        .select()
+        .from(resources)
+        .where(and(eq(resources.id, String(req.params.id)), eq(resources.departmentId, actor.departmentId)));
       if (!resource || (resource.status === 'retired' && !actor.roles.includes('admin'))) {
         throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       }
@@ -174,6 +190,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         .where(
           and(
             eq(bookings.resourceId, resource.id),
+            eq(bookings.departmentId, actor.departmentId),
             sql`${bookings.status} in ('CONFIRMED', 'PENDING_APPROVAL')`,
             sql`${bookings.startTime} < ${to}`,
             sql`${bookings.endTime} > ${from}`,
@@ -184,7 +201,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         .from(resourceApprovers)
         .where(eq(resourceApprovers.resourceId, resource.id));
       const approverIds = approverRows.map((row) => row.userId);
-      const department = await getDepartmentSettings(db, config.timezone);
+      const department = await getDepartmentSettings(db, actor.departmentId);
       res.json({
         data: {
           resourceId: resource.id,
@@ -218,7 +235,10 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     auth,
     asyncRoute(async (req, res) => {
       const actor = actorOf(req);
-      const [resource] = await db.select().from(resources).where(eq(resources.id, String(req.params.id)));
+      const [resource] = await db
+        .select()
+        .from(resources)
+        .where(and(eq(resources.id, String(req.params.id)), eq(resources.departmentId, actor.departmentId)));
       if (!resource || (resource.status === 'retired' && !actor.roles.includes('admin'))) {
         throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       }
@@ -253,14 +273,26 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(updateResourceSchema, req.body);
+      const actor = actorOf(req);
+      if (body.parentResourceId === String(req.params.id)) {
+        throw new ProblemError(400, 'VALIDATION_ERROR', 'A resource cannot be its own parent.');
+      }
+      if (body.parentResourceId) {
+        const [parent] = await db
+          .select({ id: resources.id })
+          .from(resources)
+          .where(and(eq(resources.id, body.parentResourceId), eq(resources.departmentId, actor.departmentId)));
+        if (!parent) throw new ProblemError(400, 'VALIDATION_ERROR', 'Parent resource must belong to this department.');
+      }
       const [updated] = await db
         .update(resources)
         .set({ ...body, updatedAt: new Date() })
-        .where(eq(resources.id, String(req.params.id)))
+        .where(and(eq(resources.id, String(req.params.id)), eq(resources.departmentId, actor.departmentId)))
         .returning();
       if (!updated) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: body.status && body.status !== 'active' ? 'resource.deactivated' : 'resource.updated',
         targetType: 'resource',
         targetId: updated.id,
@@ -282,7 +314,11 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         throw new ProblemError(400, 'VALIDATION_ERROR', 'Opening hours on the same day cannot overlap.');
       }
       const resourceId = String(req.params.id);
-      const [resource] = await db.select({ id: resources.id }).from(resources).where(eq(resources.id, resourceId));
+      const actor = actorOf(req);
+      const [resource] = await db
+        .select({ id: resources.id })
+        .from(resources)
+        .where(and(eq(resources.id, resourceId), eq(resources.departmentId, actor.departmentId)));
       if (!resource) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       await db.transaction(async (tx) => {
         await tx.delete(resourceHours).where(eq(resourceHours.resourceId, resourceId));
@@ -291,7 +327,8 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         }
       });
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'resource.hours_updated',
         targetType: 'resource',
         targetId: resourceId,
@@ -310,9 +347,15 @@ export function createResourceRouter(db: Database, config: AppConfig) {
       const end = new Date(body.endTime);
       if (!(end > start)) throw new ProblemError(400, 'VALIDATION_ERROR', 'Block end must be after the start.');
       const resourceId = String(req.params.id);
+      const actor = actorOf(req);
       const created = await db.transaction(async (tx) => {
-        await tx.execute(sql`select id from resources where id = ${resourceId} for update`);
-        const [resource] = await tx.select().from(resources).where(eq(resources.id, resourceId));
+        await tx.execute(
+          sql`select id from resources where id = ${resourceId} and department_id = ${actor.departmentId} for update`,
+        );
+        const [resource] = await tx
+          .select()
+          .from(resources)
+          .where(and(eq(resources.id, resourceId), eq(resources.departmentId, actor.departmentId)));
         if (!resource) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
         const conflicts = await tx
           .select({ id: bookings.id, startTime: bookings.startTime, endTime: bookings.endTime })
@@ -320,6 +363,7 @@ export function createResourceRouter(db: Database, config: AppConfig) {
           .where(
             and(
               eq(bookings.resourceId, resourceId),
+              eq(bookings.departmentId, actor.departmentId),
               eq(bookings.status, 'CONFIRMED'),
               sql`${bookings.blockedRange} && ${toTstzRange(start, occupiedEnd(end, 0))}::tstzrange`,
             ),
@@ -340,7 +384,8 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         return block;
       });
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'resource.block_created',
         targetType: 'resource',
         targetId: resourceId,
@@ -354,13 +399,21 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     '/:id/blocks/:blockId',
     ...admin,
     asyncRoute(async (req, res) => {
+      const actor = actorOf(req);
+      const resourceId = String(req.params.id);
+      const [resource] = await db
+        .select({ id: resources.id })
+        .from(resources)
+        .where(and(eq(resources.id, resourceId), eq(resources.departmentId, actor.departmentId)));
+      if (!resource) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       const [removed] = await db
         .delete(resourceBlocks)
-        .where(and(eq(resourceBlocks.id, String(req.params.blockId)), eq(resourceBlocks.resourceId, String(req.params.id))))
+        .where(and(eq(resourceBlocks.id, String(req.params.blockId)), eq(resourceBlocks.resourceId, resourceId)))
         .returning();
       if (!removed) throw new ProblemError(404, 'NOT_FOUND', 'Block not found.');
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'resource.block_deleted',
         targetType: 'resource',
         targetId: String(req.params.id),
@@ -376,14 +429,18 @@ export function createResourceRouter(db: Database, config: AppConfig) {
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(approversSchema, req.body);
       const resourceId = String(req.params.id);
-      const [resource] = await db.select({ id: resources.id }).from(resources).where(eq(resources.id, resourceId));
+      const actor = actorOf(req);
+      const [resource] = await db
+        .select({ id: resources.id })
+        .from(resources)
+        .where(and(eq(resources.id, resourceId), eq(resources.departmentId, actor.departmentId)));
       if (!resource) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
       if (body.userIds.length > 0) {
         const rows = await db
           .select({ id: users.id, roleId: userRoles.roleId, isActive: users.isActive })
           .from(users)
           .innerJoin(userRoles, eq(userRoles.userId, users.id))
-          .where(inArray(users.id, body.userIds));
+          .where(and(inArray(users.id, body.userIds), eq(users.departmentId, actor.departmentId)));
         const eligible = new Set(
           rows.filter((row) => row.isActive && (row.roleId === 'approver' || row.roleId === 'admin')).map((row) => row.id),
         );
@@ -398,7 +455,8 @@ export function createResourceRouter(db: Database, config: AppConfig) {
         }
       });
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'resource.approvers_updated',
         targetType: 'resource',
         targetId: resourceId,

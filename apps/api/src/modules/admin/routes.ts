@@ -27,21 +27,48 @@ export function createAdminRouter(db: Database, config: AppConfig) {
     '/dashboard',
     ...admin,
     asyncRoute(async (req, res) => {
+      const actor = actorOf(req);
       const counts = await db
         .select({ status: bookings.status, count: sql<number>`count(*)::int` })
         .from(bookings)
+        .where(eq(bookings.departmentId, actor.departmentId))
         .groupBy(bookings.status);
-      const [resourceCount] = await db.select({ count: sql<number>`count(*)::int` }).from(resources);
-      const [userCount] = await db.select({ count: sql<number>`count(*)::int` }).from(users);
-      const department = await getDepartmentSettings(db, config.timezone);
+      const [resourceCount] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(resources)
+        .where(eq(resources.departmentId, actor.departmentId));
+      const [userCount] = await db
+        .select({ count: sql<number>`count(*)::int` })
+        .from(users)
+        .where(eq(users.departmentId, actor.departmentId));
+      const department = await getDepartmentSettings(db, actor.departmentId);
       const rangeStart = new Date();
       const rangeEnd = new Date(Date.now() + 7 * 86_400_000);
-      const resourceRows = await db.select().from(resources).where(eq(resources.status, 'active'));
-      const hourRows = await db.select().from(resourceHours);
+      const resourceRows = await db
+        .select()
+        .from(resources)
+        .where(and(eq(resources.departmentId, actor.departmentId), eq(resources.status, 'active')));
+      const hourRows = await db
+        .select({
+          resourceId: resourceHours.resourceId,
+          weekday: resourceHours.weekday,
+          openTime: resourceHours.openTime,
+          closeTime: resourceHours.closeTime,
+        })
+        .from(resourceHours)
+        .innerJoin(resources, eq(resources.id, resourceHours.resourceId))
+        .where(eq(resources.departmentId, actor.departmentId));
       const bookingRows = await db
         .select()
         .from(bookings)
-        .where(and(eq(bookings.status, 'CONFIRMED'), lte(bookings.startTime, rangeEnd), gte(bookings.endTime, rangeStart)));
+        .where(
+          and(
+            eq(bookings.departmentId, actor.departmentId),
+            eq(bookings.status, 'CONFIRMED'),
+            lte(bookings.startTime, rangeEnd),
+            gte(bookings.endTime, rangeStart),
+          ),
+        );
       const usage = utilization({
         rangeStart,
         rangeEnd,
@@ -58,7 +85,7 @@ export function createAdminRouter(db: Database, config: AppConfig) {
           end: booking.endTime,
         })),
       });
-      const queue = await bookingsService.list(actorOf(req), { page: 1, pageSize: 5, scope: 'queue' });
+      const queue = await bookingsService.list(actor, { page: 1, pageSize: 5, scope: 'queue' });
       res.json({
         data: {
           counts,
@@ -79,8 +106,8 @@ export function createAdminRouter(db: Database, config: AppConfig) {
     to: z.string().datetime().optional(),
   });
 
-  async function reportRows(query: z.infer<typeof reportSchema>) {
-    const filters = [];
+  async function reportRows(departmentId: string, query: z.infer<typeof reportSchema>) {
+    const filters = [eq(bookings.departmentId, departmentId)];
     if (query.status) filters.push(eq(bookings.status, query.status));
     if (query.resourceId) filters.push(eq(bookings.resourceId, query.resourceId));
     if (query.from) filters.push(gte(bookings.startTime, new Date(query.from)));
@@ -98,8 +125,11 @@ export function createAdminRouter(db: Database, config: AppConfig) {
         purpose: bookings.purpose,
       })
       .from(bookings)
-      .innerJoin(resources, eq(resources.id, bookings.resourceId))
-      .innerJoin(users, eq(users.id, bookings.userId))
+      .innerJoin(
+        resources,
+        and(eq(resources.id, bookings.resourceId), eq(resources.departmentId, departmentId)),
+      )
+      .innerJoin(users, and(eq(users.id, bookings.userId), eq(users.departmentId, departmentId)))
       .where(where)
       .orderBy(desc(bookings.startTime))
       .limit(query.pageSize)
@@ -111,7 +141,7 @@ export function createAdminRouter(db: Database, config: AppConfig) {
     ...staff,
     asyncRoute(async (req, res) => {
       const query = parseOrThrow(reportSchema, req.query);
-      const rows = await reportRows(query);
+      const rows = await reportRows(actorOf(req).departmentId, query);
       res.json({
         data: rows.map((row) => ({
           ...row,
@@ -127,7 +157,7 @@ export function createAdminRouter(db: Database, config: AppConfig) {
     ...staff,
     asyncRoute(async (req, res) => {
       const query = parseOrThrow(reportSchema, { ...req.query, pageSize: req.query.pageSize ?? '1000' });
-      const rows = await reportRows(query);
+      const rows = await reportRows(actorOf(req).departmentId, query);
       const header = ['id', 'resource', 'requester', 'email', 'startTime', 'endTime', 'status', 'purpose'];
       const lines = [
         header.join(','),
@@ -148,7 +178,11 @@ export function createAdminRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const query = parseOrThrow(listQuerySchema, req.query);
-      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(auditLog);
+      const actor = actorOf(req);
+      const [{ total }] = await db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(auditLog)
+        .where(eq(auditLog.departmentId, actor.departmentId));
       const rows = await db
         .select({
           id: auditLog.id,
@@ -160,7 +194,11 @@ export function createAdminRouter(db: Database, config: AppConfig) {
           actorName: users.fullName,
         })
         .from(auditLog)
-        .leftJoin(users, eq(users.id, auditLog.actorId))
+        .leftJoin(
+          users,
+          and(eq(users.id, auditLog.actorId), eq(users.departmentId, actor.departmentId)),
+        )
+        .where(eq(auditLog.departmentId, actor.departmentId))
         .orderBy(desc(auditLog.createdAt))
         .limit(query.pageSize)
         .offset((query.page - 1) * query.pageSize);
@@ -176,8 +214,9 @@ export function createAdminRouter(db: Database, config: AppConfig) {
   router.get(
     '/settings',
     ...admin,
-    asyncRoute(async (_req, res) => {
-      res.json({ data: await getDepartmentSettings(db, config.timezone) });
+    asyncRoute(async (req, res) => {
+      const actor = actorOf(req);
+      res.json({ data: await getDepartmentSettings(db, actor.departmentId) });
     }),
   );
 
@@ -189,9 +228,11 @@ export function createAdminRouter(db: Database, config: AppConfig) {
       if (!isValidTimeZone(body.timezone)) {
         throw new ProblemError(400, 'VALIDATION_ERROR', 'Unknown timezone.');
       }
-      await saveDepartmentSettings(db, body);
+      const actor = actorOf(req);
+      await saveDepartmentSettings(db, actor.departmentId, body);
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'settings.updated',
         targetType: 'settings',
         targetId: 'department',

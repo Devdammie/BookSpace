@@ -11,13 +11,21 @@ import type { AppConfig } from '../../config.js';
 import { publicUser } from '../auth/routes.js';
 import { hashPassword, temporaryPassword } from '../auth/passwords.js';
 
-async function activeAdminCount(db: Database) {
+async function activeAdminCount(db: Database, departmentId: string) {
   const rows = await db
     .select({ id: users.id })
     .from(users)
     .innerJoin(userRoles, eq(userRoles.userId, users.id))
-    .where(and(eq(userRoles.roleId, 'admin'), eq(users.isActive, true)));
+    .where(and(eq(users.departmentId, departmentId), eq(userRoles.roleId, 'admin'), eq(users.isActive, true)));
   return new Set(rows.map((row) => row.id)).size;
+}
+
+async function departmentUser(db: Database, departmentId: string, userId: string) {
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(and(eq(users.id, userId), eq(users.departmentId, departmentId)));
+  return user ?? null;
 }
 
 export function createUserRouter(db: Database, config: AppConfig) {
@@ -30,8 +38,15 @@ export function createUserRouter(db: Database, config: AppConfig) {
     '/me',
     openAuth,
     asyncRoute(async (req, res) => {
-      const department = await getDepartmentSettings(db, config.timezone);
-      res.json({ data: { ...publicUser(actorOf(req)), timezone: department.timezone } });
+      const actor = actorOf(req);
+      const department = await getDepartmentSettings(db, actor.departmentId);
+      res.json({
+        data: {
+          ...publicUser(actor),
+          timezone: department.timezone,
+          departmentName: undefined,
+        },
+      });
     }),
   );
 
@@ -41,7 +56,10 @@ export function createUserRouter(db: Database, config: AppConfig) {
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(updateMeSchema, req.body);
       const actor = actorOf(req);
-      await db.update(users).set({ fullName: body.fullName, updatedAt: new Date() }).where(eq(users.id, actor.id));
+      await db
+        .update(users)
+        .set({ fullName: body.fullName, updatedAt: new Date() })
+        .where(and(eq(users.id, actor.id), eq(users.departmentId, actor.departmentId)));
       res.json({ data: { ...publicUser(actor), fullName: body.fullName } });
     }),
   );
@@ -49,7 +67,8 @@ export function createUserRouter(db: Database, config: AppConfig) {
   router.get(
     '/',
     ...admin,
-    asyncRoute(async (_req, res) => {
+    asyncRoute(async (req, res) => {
+      const actor = actorOf(req);
       const rows = await db
         .select({
           id: users.id,
@@ -62,16 +81,20 @@ export function createUserRouter(db: Database, config: AppConfig) {
         })
         .from(users)
         .leftJoin(userRoles, eq(userRoles.userId, users.id))
+        .where(eq(users.departmentId, actor.departmentId))
         .orderBy(asc(users.fullName));
-      const grouped = new Map<string, {
-        id: string;
-        email: string;
-        fullName: string;
-        userType: string;
-        isActive: boolean;
-        mustChangePassword: boolean;
-        roles: string[];
-      }>();
+      const grouped = new Map<
+        string,
+        {
+          id: string;
+          email: string;
+          fullName: string;
+          userType: string;
+          isActive: boolean;
+          mustChangePassword: boolean;
+          roles: string[];
+        }
+      >();
       for (const row of rows) {
         const current = grouped.get(row.id) ?? { ...row, roles: [] as string[] };
         if (row.roleId) current.roles.push(row.roleId);
@@ -86,12 +109,14 @@ export function createUserRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(createUserSchema, req.body);
+      const actor = actorOf(req);
       const password = body.temporaryPassword ?? temporaryPassword();
       try {
         const created = await db.transaction(async (tx) => {
           const [user] = await tx
             .insert(users)
             .values({
+              departmentId: actor.departmentId,
               email: body.email,
               fullName: body.fullName,
               userType: body.userType,
@@ -107,7 +132,8 @@ export function createUserRouter(db: Database, config: AppConfig) {
             });
           await tx.insert(userRoles).values(body.roles.map((roleId) => ({ userId: user.id, roleId })));
           await tx.insert(auditLog).values({
-            actorId: actorOf(req).id,
+            departmentId: actor.departmentId,
+            actorId: actor.id,
             action: 'user.created',
             targetType: 'user',
             targetId: user.id,
@@ -130,8 +156,11 @@ export function createUserRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(updateUserSchema, req.body);
+      const actor = actorOf(req);
       const userId = String(req.params.id);
-      if (body.isActive === false && userId === actorOf(req).id) {
+      const existing = await departmentUser(db, actor.departmentId, userId);
+      if (!existing) throw new ProblemError(404, 'NOT_FOUND', 'User not found.');
+      if (body.isActive === false && userId === actor.id) {
         throw new ProblemError(409, 'INVALID_TRANSITION', 'You cannot deactivate your own account.');
       }
       if (body.isActive === false) {
@@ -139,18 +168,25 @@ export function createUserRouter(db: Database, config: AppConfig) {
           .select({ roleId: userRoles.roleId })
           .from(userRoles)
           .where(and(eq(userRoles.userId, userId), eq(userRoles.roleId, 'admin')));
-        if (role && (await activeAdminCount(db)) <= 1) {
+        if (role && (await activeAdminCount(db, actor.departmentId)) <= 1) {
           throw new ProblemError(409, 'INVALID_TRANSITION', 'The last active administrator cannot be deactivated.');
         }
       }
       const [updated] = await db
         .update(users)
         .set({ ...body, updatedAt: new Date() })
-        .where(eq(users.id, userId))
-        .returning({ id: users.id, email: users.email, fullName: users.fullName, userType: users.userType, isActive: users.isActive });
+        .where(and(eq(users.id, userId), eq(users.departmentId, actor.departmentId)))
+        .returning({
+          id: users.id,
+          email: users.email,
+          fullName: users.fullName,
+          userType: users.userType,
+          isActive: users.isActive,
+        });
       if (!updated) throw new ProblemError(404, 'NOT_FOUND', 'User not found.');
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'user.updated',
         targetType: 'user',
         targetId: userId,
@@ -164,16 +200,18 @@ export function createUserRouter(db: Database, config: AppConfig) {
     '/:id/reset-password',
     ...admin,
     asyncRoute(async (req, res) => {
+      const actor = actorOf(req);
       const userId = String(req.params.id);
+      const existing = await departmentUser(db, actor.departmentId, userId);
+      if (!existing) throw new ProblemError(404, 'NOT_FOUND', 'User not found.');
       const password = temporaryPassword();
-      const [updated] = await db
+      await db
         .update(users)
         .set({ passwordHash: await hashPassword(password), mustChangePassword: true, updatedAt: new Date() })
-        .where(eq(users.id, userId))
-        .returning({ id: users.id });
-      if (!updated) throw new ProblemError(404, 'NOT_FOUND', 'User not found.');
+        .where(and(eq(users.id, userId), eq(users.departmentId, actor.departmentId)));
       await db.insert(auditLog).values({
-        actorId: actorOf(req).id,
+        departmentId: actor.departmentId,
+        actorId: actor.id,
         action: 'user.password_reset',
         targetType: 'user',
         targetId: userId,
@@ -188,20 +226,27 @@ export function createUserRouter(db: Database, config: AppConfig) {
     ...admin,
     asyncRoute(async (req, res) => {
       const body = parseOrThrow(setRolesSchema, req.body);
+      const actor = actorOf(req);
       const userId = String(req.params.id);
-      const [user] = await db.select({ id: users.id, isActive: users.isActive }).from(users).where(eq(users.id, userId));
+      const user = await departmentUser(db, actor.departmentId, userId);
       if (!user) throw new ProblemError(404, 'NOT_FOUND', 'User not found.');
       const hadAdmin = Boolean(
         (await db.select().from(userRoles).where(and(eq(userRoles.userId, userId), eq(userRoles.roleId, 'admin'))))[0],
       );
-      if (hadAdmin && user.isActive && !body.roles.includes('admin') && (await activeAdminCount(db)) <= 1) {
+      if (
+        hadAdmin &&
+        user.isActive &&
+        !body.roles.includes('admin') &&
+        (await activeAdminCount(db, actor.departmentId)) <= 1
+      ) {
         throw new ProblemError(409, 'INVALID_TRANSITION', 'The last active administrator role cannot be removed.');
       }
       await db.transaction(async (tx) => {
         await tx.delete(userRoles).where(eq(userRoles.userId, userId));
         await tx.insert(userRoles).values(body.roles.map((roleId) => ({ userId, roleId })));
         await tx.insert(auditLog).values({
-          actorId: actorOf(req).id,
+          departmentId: actor.departmentId,
+          actorId: actor.id,
           action: 'user.roles_changed',
           targetType: 'user',
           targetId: userId,
