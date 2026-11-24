@@ -18,16 +18,26 @@ pool.on('error', (error) => {
   console.error('Postgres pool error', error);
 });
 const { app, logger } = createApp({ db, pool, config });
-startScheduler(db, config, { error: (error) => logger.error({ err: error }, 'maintenance job failed') });
+const scheduler = startScheduler(db, config, {
+  error: (error) => logger.error({ err: error }, 'maintenance job failed'),
+});
 
 const server = app.listen(config.port, () => {
   logger.info({ port: config.port }, 'BookSpace API listening');
 });
 
+let shuttingDown = false;
+async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  await scheduler.stop();
+  server.close(() => {
+    void pool.end().finally(() => process.exit(0));
+  });
+}
+
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
-    server.close(() => {
-      void pool.end().finally(() => process.exit(0));
-    });
+    void shutdown();
   });
 }
