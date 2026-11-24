@@ -74,12 +74,15 @@ export function findFreeSlots(input: {
   durationMinutes: number;
   stepMinutes: number;
   busy: { start: Date; end: Date }[];
+  bufferMinutes?: number;
   limit?: number;
+  preferAround?: Date;
 }): { start: Date; end: Date }[] {
   const open = zonedTimeToUtc(input.dateKey, normalizeTime(input.openTime), input.timeZone);
   const close = zonedTimeToUtc(input.dateKey, normalizeTime(input.closeTime), input.timeZone);
-  const results: { start: Date; end: Date }[] = [];
-  const limit = input.limit ?? 3;
+  const bufferMinutes = input.bufferMinutes ?? 0;
+  const candidates: { start: Date; end: Date; distance: number }[] = [];
+  const prefer = input.preferAround?.getTime() ?? open.getTime();
   for (
     let cursor = open.getTime();
     cursor + input.durationMinutes * 60_000 <= close.getTime();
@@ -87,9 +90,24 @@ export function findFreeSlots(input: {
   ) {
     const start = new Date(cursor);
     const end = new Date(cursor + input.durationMinutes * 60_000);
-    const hit = input.busy.some((busy) => rangesOverlap(start, end, busy.start, busy.end));
-    if (!hit) results.push({ start, end });
-    if (results.length >= limit) break;
+    const occupied = occupiedEnd(end, bufferMinutes);
+    const hit = input.busy.some((busy) => rangesOverlap(start, occupied, busy.start, busy.end));
+    if (!hit) candidates.push({ start, end, distance: Math.abs(cursor - prefer) });
   }
-  return results;
+  candidates.sort((a, b) => a.distance - b.distance);
+  const limit = input.limit ?? 3;
+  return candidates.slice(0, limit).map(({ start, end }) => ({ start, end }));
+}
+
+export function rangesOverlapConfirmed(
+  start: Date,
+  end: Date,
+  bufferMinutes: number,
+  confirmed: { start: Date; end: Date; bufferMinutes?: number }[],
+): boolean {
+  const occupied = occupiedEnd(end, bufferMinutes);
+  return confirmed.some((row) => {
+    const otherEnd = occupiedEnd(row.end, row.bufferMinutes ?? 0);
+    return rangesOverlap(start, occupied, row.start, otherEnd);
+  });
 }

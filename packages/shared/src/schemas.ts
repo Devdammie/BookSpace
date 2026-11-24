@@ -21,15 +21,40 @@ const emailSchema = z
 
 const timeSchema = z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/, 'Use HH:MM');
 
+const slugSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .min(2)
+  .max(48)
+  .regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/, 'Use lowercase letters, numbers, and hyphens');
+
 export const loginSchema = z.object({
   email: emailSchema,
   password: z.string().min(1).max(200),
+  departmentSlug: slugSchema,
 });
 
-export const changePasswordSchema = z.object({
-  currentPassword: z.string().min(1).max(200),
-  newPassword: passwordSchema,
+export const changePasswordSchema = z
+  .object({
+    currentPassword: z.string().min(1).max(200),
+    newPassword: passwordSchema,
+    confirmPassword: z.string().min(1).max(200).optional(),
+  })
+  .refine((value) => value.confirmPassword === undefined || value.confirmPassword === value.newPassword, {
+    message: 'Passwords must match',
+    path: ['confirmPassword'],
+  });
+
+export const createDepartmentSchema = z.object({
+  name: z.string().trim().min(2).max(200),
+  slug: slugSchema,
+  timezone: z.string().min(1).max(100).default('America/Los_Angeles'),
+  adminFullName: z.string().trim().min(2).max(200),
+  adminEmail: emailSchema,
+  adminPassword: passwordSchema,
 });
+
 
 export const createUserSchema = z.object({
   email: emailSchema,
