@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  addDays,
   canCancel,
   canDecide,
   canEditPending,
@@ -9,6 +10,7 @@ import {
   getZonedParts,
   intervalOverlapsBlock,
   occupiedEnd,
+  rangesOverlapConfirmed,
   toTstzRange,
   transition,
   type BookingStatus,
@@ -21,6 +23,7 @@ import {
   auditLog,
   bookingEvents,
   bookings,
+  departments,
   idempotencyKeys,
   notifications,
   resourceApprovers,
@@ -69,47 +72,80 @@ function dto(input: {
   };
 }
 
-async function suggest(db: Database, input: {
-  resourceId: string;
-  start: Date;
-  end: Date;
-  bufferMinutes: number;
-  timeZone: string;
-  hours: { weekday: number; openTime: string; closeTime: string }[];
-}) {
-  const dateKey = getZonedParts(input.start, input.timeZone).dateKey;
-  const weekday = getZonedParts(input.start, input.timeZone).weekday;
-  const windows = input.hours.filter((hour) => hour.weekday === weekday);
-  const openTime = windows[0]?.openTime ?? '08:00:00';
-  const closeTime = windows[0]?.closeTime ?? '18:00:00';
+async function suggest(
+  db: Database,
+  input: {
+    departmentId: string;
+    resourceId: string;
+    start: Date;
+    end: Date;
+    bufferMinutes: number;
+    timeZone: string;
+    hours: { weekday: number; openTime: string; closeTime: string }[];
+  },
+) {
+  const requested = getZonedParts(input.start, input.timeZone);
   const confirmed = await db
     .select({ startTime: bookings.startTime, endTime: bookings.endTime })
     .from(bookings)
-    .where(and(eq(bookings.resourceId, input.resourceId), eq(bookings.status, 'CONFIRMED')));
+    .where(
+      and(
+        eq(bookings.departmentId, input.departmentId),
+        eq(bookings.resourceId, input.resourceId),
+        eq(bookings.status, 'CONFIRMED'),
+      ),
+    );
   const blocks = await db
     .select({ startTime: resourceBlocks.startTime, endTime: resourceBlocks.endTime })
     .from(resourceBlocks)
     .where(eq(resourceBlocks.resourceId, input.resourceId));
   const busy = [
-    ...confirmed.map((row) => ({ start: row.startTime, end: occupiedEnd(row.endTime, input.bufferMinutes) })),
+    ...confirmed.map((row) => ({ start: row.startTime, end: row.endTime })),
     ...blocks.map((row) => ({ start: row.startTime, end: row.endTime })),
   ];
   const durationMinutes = Math.max(15, Math.round((input.end.getTime() - input.start.getTime()) / 60_000));
-  return findFreeSlots({
-    dateKey,
-    timeZone: input.timeZone,
-    openTime,
-    closeTime,
-    durationMinutes,
-    stepMinutes: 30,
-    busy,
-    limit: 3,
-  }).map((slot) => ({ startTime: slot.start.toISOString(), endTime: slot.end.toISOString() }));
+  const offsets = [0, -1, 1, -2, 2, -3, 3];
+  const suggestions: { startTime: string; endTime: string }[] = [];
+
+  for (const offset of offsets) {
+    const dateKey = addDays(requested.dateKey, offset);
+    const weekday = (requested.weekday + offset + 7) % 7;
+    const windows = input.hours.filter((hour) => hour.weekday === weekday);
+    for (const window of windows) {
+      const slots = findFreeSlots({
+        dateKey,
+        timeZone: input.timeZone,
+        openTime: window.openTime,
+        closeTime: window.closeTime,
+        durationMinutes,
+        stepMinutes: 30,
+        busy,
+        bufferMinutes: input.bufferMinutes,
+        preferAround: input.start,
+        limit: 3,
+      });
+      for (const slot of slots) {
+        suggestions.push({ startTime: slot.start.toISOString(), endTime: slot.end.toISOString() });
+      }
+    }
+    if (suggestions.length >= 3) break;
+  }
+
+  return suggestions
+    .sort(
+      (a, b) =>
+        Math.abs(new Date(a.startTime).getTime() - input.start.getTime()) -
+        Math.abs(new Date(b.startTime).getTime() - input.start.getTime()),
+    )
+    .slice(0, 3);
 }
 
-export function createBookingService(db: Database, config: AppConfig) {
-  async function resourceContext(resourceId: string) {
-    const [resource] = await db.select().from(resources).where(eq(resources.id, resourceId));
+export function createBookingService(db: Database, _config: AppConfig) {
+  async function resourceContext(resourceId: string, departmentId: string) {
+    const [resource] = await db
+      .select()
+      .from(resources)
+      .where(and(eq(resources.id, resourceId), eq(resources.departmentId, departmentId)));
     if (!resource) throw new ProblemError(404, 'NOT_FOUND', 'Resource not found.');
     const hours = await db.select().from(resourceHours).where(eq(resourceHours.resourceId, resourceId));
     const blocks = await db.select().from(resourceBlocks).where(eq(resourceBlocks.resourceId, resourceId));
@@ -142,25 +178,86 @@ export function createBookingService(db: Database, config: AppConfig) {
       hours: context.hours,
     });
     if (issue) throw new ProblemError(issue.status, issue.code, issue.detail);
-    if (intervalOverlapsBlock(start, end, context.resource.bufferMinutes, context.blocks.map((block) => ({
-      start: block.startTime,
-      end: block.endTime,
-    })))) {
-      throw new ProblemError(409, 'RESOURCE_BLOCKED', 'The resource is blocked for maintenance or closure during that time.');
+    if (
+      intervalOverlapsBlock(
+        start,
+        end,
+        context.resource.bufferMinutes,
+        context.blocks.map((block) => ({ start: block.startTime, end: block.endTime })),
+      )
+    ) {
+      throw new ProblemError(
+        409,
+        'RESOURCE_BLOCKED',
+        'The resource is blocked for maintenance or closure during that time.',
+      );
     }
   }
 
-  async function withSuggestions(error: unknown, context: {
+  async function assertNoHardConflict(input: {
+    departmentId: string;
     resourceId: string;
     start: Date;
     end: Date;
     bufferMinutes: number;
-    timeZone: string;
-    hours: { weekday: number; openTime: string; closeTime: string }[];
-  }): Promise<never> {
-    if (error instanceof ProblemError && error.code === 'SLOT_CONFLICT') {
+    excludeBookingId?: string;
+  }) {
+    const bookingFilters = [
+      eq(bookings.departmentId, input.departmentId),
+      eq(bookings.resourceId, input.resourceId),
+      eq(bookings.status, 'CONFIRMED'),
+    ];
+    if (input.excludeBookingId) bookingFilters.push(ne(bookings.id, input.excludeBookingId));
+    const confirmed = await db
+      .select({
+        start: bookings.startTime,
+        end: bookings.endTime,
+        bufferMinutes: resources.bufferMinutes,
+      })
+      .from(bookings)
+      .innerJoin(
+        resources,
+        and(eq(resources.id, bookings.resourceId), eq(resources.departmentId, input.departmentId)),
+      )
+      .where(and(...bookingFilters));
+    if (rangesOverlapConfirmed(input.start, input.end, input.bufferMinutes, confirmed)) {
+      throw new ProblemError(409, 'SLOT_CONFLICT', 'That time is already reserved.');
+    }
+    const blocks = await db
+      .select({ start: resourceBlocks.startTime, end: resourceBlocks.endTime })
+      .from(resourceBlocks)
+      .innerJoin(
+        resources,
+        and(eq(resources.id, resourceBlocks.resourceId), eq(resources.departmentId, input.departmentId)),
+      )
+      .where(eq(resourceBlocks.resourceId, input.resourceId));
+    if (intervalOverlapsBlock(input.start, input.end, input.bufferMinutes, blocks)) {
+      throw new ProblemError(
+        409,
+        'RESOURCE_BLOCKED',
+        'The resource is blocked for maintenance or closure during that time.',
+      );
+    }
+  }
+
+  async function withSuggestions(
+    error: unknown,
+    context: {
+      departmentId: string;
+      resourceId: string;
+      start: Date;
+      end: Date;
+      bufferMinutes: number;
+      timeZone: string;
+      hours: { weekday: number; openTime: string; closeTime: string }[];
+    },
+  ): Promise<never> {
+    if (
+      error instanceof ProblemError &&
+      (error.code === 'SLOT_CONFLICT' || error.code === 'RESOURCE_BLOCKED')
+    ) {
       const suggestions = await suggest(db, context);
-      throw new ProblemError(409, 'SLOT_CONFLICT', error.detail, { suggestions });
+      throw new ProblemError(409, error.code, error.detail, { suggestions });
     }
     if (isSlotConflict(error)) {
       const suggestions = await suggest(db, context);
@@ -188,23 +285,29 @@ export function createBookingService(db: Database, config: AppConfig) {
         const [existing] = await db
           .select()
           .from(idempotencyKeys)
-          .where(and(eq(idempotencyKeys.userId, actor.id), eq(idempotencyKeys.key, idempotencyKey)));
+          .where(
+            and(
+              eq(idempotencyKeys.departmentId, actor.departmentId),
+              eq(idempotencyKeys.userId, actor.id),
+              eq(idempotencyKeys.key, idempotencyKey),
+            ),
+          );
         if (existing) {
           if (existing.requestHash !== requestHash) {
-            throw new ProblemError(409, 'IDEMPOTENCY_CONFLICT', 'This idempotency key was already used for a different request.');
+            throw new ProblemError(
+              409,
+              'IDEMPOTENCY_CONFLICT',
+              'This idempotency key was already used for a different request.',
+            );
           }
           return existing.responseBody as { data: BookingDto };
         }
       }
 
-      const context = await resourceContext(input.resourceId);
-      const department = await getDepartmentSettings(db, config.timezone);
-      assertPolicy(actor, context, start, end, department.timezone);
-      if (context.resource.approvalRequired && context.approverIds.length === 0) {
-        throw new ProblemError(409, 'NO_APPROVER', 'This resource requires approval, but no approver is assigned yet.');
-      }
-      const range = toTstzRange(start, occupiedEnd(end, context.resource.bufferMinutes));
+      const context = await resourceContext(input.resourceId, actor.departmentId);
+      const department = await getDepartmentSettings(db, actor.departmentId);
       const slotContext = {
+        departmentId: actor.departmentId,
         resourceId: context.resource.id,
         start,
         end,
@@ -212,11 +315,21 @@ export function createBookingService(db: Database, config: AppConfig) {
         timeZone: department.timezone,
         hours: context.hours,
       };
-
       try {
+        assertPolicy(actor, context, start, end, department.timezone);
+        await assertNoHardConflict(slotContext);
+        if (context.resource.approvalRequired && context.approverIds.length === 0) {
+          throw new ProblemError(
+            409,
+            'NO_APPROVER',
+            'This resource requires approval, but no approver is assigned yet.',
+          );
+        }
+        const range = toTstzRange(start, occupiedEnd(end, context.resource.bufferMinutes));
         return await db.transaction(async (tx) => {
           if (idempotencyKey) {
             await tx.insert(idempotencyKeys).values({
+              departmentId: actor.departmentId,
               userId: actor.id,
               key: idempotencyKey,
               requestHash,
@@ -224,11 +337,14 @@ export function createBookingService(db: Database, config: AppConfig) {
             });
           }
           if (!context.resource.approvalRequired) {
-            await tx.execute(sql`select id from resources where id = ${context.resource.id} for update`);
+            await tx.execute(
+              sql`select id from resources where id = ${context.resource.id} and department_id = ${actor.departmentId} for update`,
+            );
           }
           const [created] = await tx
             .insert(bookings)
             .values({
+              departmentId: actor.departmentId,
               userId: actor.id,
               resourceId: context.resource.id,
               startTime: start,
@@ -258,6 +374,7 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: { purpose: input.purpose },
           });
           await tx.insert(auditLog).values({
+            departmentId: actor.departmentId,
             actorId: actor.id,
             action: context.resource.approvalRequired ? 'booking.submitted' : 'booking.confirmed',
             targetType: 'booking',
@@ -265,17 +382,17 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: { resourceId: context.resource.id },
           });
           if (context.resource.approvalRequired) {
-            if (context.approverIds.length > 0) {
-              await tx.insert(notifications).values(
-                context.approverIds.map((userId) => ({
-                  userId,
-                  type: 'BOOKING_SUBMITTED',
-                  payload: { bookingId: created.id, resourceName: context.resource.name, purpose: input.purpose },
-                })),
-              );
-            }
+            await tx.insert(notifications).values(
+              context.approverIds.map((userId) => ({
+                departmentId: actor.departmentId,
+                userId,
+                type: 'BOOKING_SUBMITTED',
+                payload: { bookingId: created.id, resourceName: context.resource.name, purpose: input.purpose },
+              })),
+            );
           } else {
             await tx.insert(notifications).values({
+              departmentId: actor.departmentId,
               userId: actor.id,
               type: 'BOOKING_CONFIRMED',
               payload: { bookingId: created.id, resourceName: context.resource.name },
@@ -285,7 +402,13 @@ export function createBookingService(db: Database, config: AppConfig) {
             await tx
               .update(idempotencyKeys)
               .set({ responseBody: body })
-              .where(and(eq(idempotencyKeys.userId, actor.id), eq(idempotencyKeys.key, idempotencyKey)));
+              .where(
+                and(
+                  eq(idempotencyKeys.departmentId, actor.departmentId),
+                  eq(idempotencyKeys.userId, actor.id),
+                  eq(idempotencyKeys.key, idempotencyKey),
+                ),
+              );
           }
           return body;
         });
@@ -294,11 +417,25 @@ export function createBookingService(db: Database, config: AppConfig) {
           const [existing] = await db
             .select()
             .from(idempotencyKeys)
-            .where(and(eq(idempotencyKeys.userId, actor.id), eq(idempotencyKeys.key, idempotencyKey)));
-          if (existing?.requestHash === requestHash && existing.responseBody && !(existing.responseBody as { pending?: boolean }).pending) {
+            .where(
+              and(
+                eq(idempotencyKeys.departmentId, actor.departmentId),
+                eq(idempotencyKeys.userId, actor.id),
+                eq(idempotencyKeys.key, idempotencyKey),
+              ),
+            );
+          if (
+            existing?.requestHash === requestHash &&
+            existing.responseBody &&
+            !(existing.responseBody as { pending?: boolean }).pending
+          ) {
             return existing.responseBody as { data: BookingDto };
           }
-          throw new ProblemError(409, 'IDEMPOTENCY_CONFLICT', 'This request is already in progress. Retry in a moment.');
+          throw new ProblemError(
+            409,
+            'IDEMPOTENCY_CONFLICT',
+            'This request is already in progress. Retry in a moment.',
+          );
         }
         return withSuggestions(error, slotContext);
       }
@@ -313,35 +450,75 @@ export function createBookingService(db: Database, config: AppConfig) {
       if (!canEditPending(actor, current.userId, current.status)) {
         throw new ProblemError(409, 'INVALID_TRANSITION', 'Only a pending request can be edited.');
       }
-      if (current.version !== input.version) throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      if (current.version !== input.version) {
+        throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      }
       const start = new Date(input.startTime);
       const end = new Date(input.endTime);
-      const context = await resourceContext(current.resourceId);
-      const department = await getDepartmentSettings(db, config.timezone);
-      assertPolicy(actor, context, start, end, department.timezone);
-      const range = toTstzRange(start, occupiedEnd(end, context.resource.bufferMinutes));
-      const [updated] = await db
-        .update(bookings)
-        .set({ startTime: start, endTime: end, purpose: input.purpose, blockedRange: range, version: input.version + 1, updatedAt: new Date() })
-        .where(and(eq(bookings.id, bookingId), eq(bookings.version, input.version), eq(bookings.status, 'PENDING_APPROVAL')))
-        .returning();
-      if (!updated) throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
-      await db.insert(bookingEvents).values({
-        bookingId,
-        actorId: actor.id,
-        eventType: 'edited',
-        fromStatus: 'PENDING_APPROVAL',
-        toStatus: 'PENDING_APPROVAL',
-        details: { purpose: input.purpose },
-      });
-      await db.insert(auditLog).values({
-        actorId: actor.id,
-        action: 'booking.edited',
-        targetType: 'booking',
-        targetId: bookingId,
-        details: {},
-      });
-      return { data: dto({ ...updated, resourceName: context.resource.name, requesterName: current.requesterName, message: 'Request updated.' }) };
+      const context = await resourceContext(current.resourceId, actor.departmentId);
+      const department = await getDepartmentSettings(db, actor.departmentId);
+      const slotContext = {
+        departmentId: actor.departmentId,
+        resourceId: context.resource.id,
+        start,
+        end,
+        bufferMinutes: context.resource.bufferMinutes,
+        timeZone: department.timezone,
+        hours: context.hours,
+      };
+      try {
+        assertPolicy(actor, context, start, end, department.timezone);
+        await assertNoHardConflict({ ...slotContext, excludeBookingId: bookingId });
+        const range = toTstzRange(start, occupiedEnd(end, context.resource.bufferMinutes));
+        const [updated] = await db
+          .update(bookings)
+          .set({
+            startTime: start,
+            endTime: end,
+            purpose: input.purpose,
+            blockedRange: range,
+            version: input.version + 1,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(bookings.id, bookingId),
+              eq(bookings.departmentId, actor.departmentId),
+              eq(bookings.version, input.version),
+              eq(bookings.status, 'PENDING_APPROVAL'),
+            ),
+          )
+          .returning();
+        if (!updated) {
+          throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+        }
+        await db.insert(bookingEvents).values({
+          bookingId,
+          actorId: actor.id,
+          eventType: 'edited',
+          fromStatus: 'PENDING_APPROVAL',
+          toStatus: 'PENDING_APPROVAL',
+          details: { purpose: input.purpose },
+        });
+        await db.insert(auditLog).values({
+          departmentId: actor.departmentId,
+          actorId: actor.id,
+          action: 'booking.edited',
+          targetType: 'booking',
+          targetId: bookingId,
+          details: {},
+        });
+        return {
+          data: dto({
+            ...updated,
+            resourceName: context.resource.name,
+            requesterName: current.requesterName,
+            message: 'Request updated.',
+          }),
+        };
+      } catch (error) {
+        return withSuggestions(error, slotContext);
+      }
     },
 
     async cancel(actor: Actor, bookingId: string, reason?: string) {
@@ -350,7 +527,11 @@ export function createBookingService(db: Database, config: AppConfig) {
         throw new ProblemError(409, 'INVALID_TRANSITION', 'This booking cannot be cancelled.');
       }
       if (current.status === 'CONFIRMED' && !reason?.trim()) {
-        throw new ProblemError(400, 'VALIDATION_ERROR', 'A reason is required to cancel a confirmed booking.');
+        throw new ProblemError(
+          400,
+          'VALIDATION_ERROR',
+          'A reason is required to cancel a confirmed booking.',
+        );
       }
       let next: BookingStatus;
       try {
@@ -361,9 +542,18 @@ export function createBookingService(db: Database, config: AppConfig) {
       const [updated] = await db
         .update(bookings)
         .set({ status: next, version: current.version + 1, updatedAt: new Date() })
-        .where(and(eq(bookings.id, bookingId), eq(bookings.version, current.version), eq(bookings.status, current.status)))
+        .where(
+          and(
+            eq(bookings.id, bookingId),
+            eq(bookings.departmentId, actor.departmentId),
+            eq(bookings.version, current.version),
+            eq(bookings.status, current.status),
+          ),
+        )
         .returning();
-      if (!updated) throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      if (!updated) {
+        throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      }
       await db.insert(bookingEvents).values({
         bookingId,
         actorId: actor.id,
@@ -373,6 +563,7 @@ export function createBookingService(db: Database, config: AppConfig) {
         details: { reason: reason ?? '' },
       });
       await db.insert(auditLog).values({
+        departmentId: actor.departmentId,
         actorId: actor.id,
         action: 'booking.cancelled',
         targetType: 'booking',
@@ -380,16 +571,24 @@ export function createBookingService(db: Database, config: AppConfig) {
         details: { reason: reason ?? '' },
       });
       const recipients = new Set<string>([current.userId]);
-      const context = await resourceContext(current.resourceId);
+      const context = await resourceContext(current.resourceId, actor.departmentId);
       for (const approverId of context.approverIds) recipients.add(approverId);
       await db.insert(notifications).values(
         [...recipients].map((userId) => ({
+          departmentId: actor.departmentId,
           userId,
           type: 'BOOKING_CANCELLED',
           payload: { bookingId, resourceName: current.resourceName, reason: reason ?? '' },
         })),
       );
-      return { data: dto({ ...updated, resourceName: current.resourceName, requesterName: current.requesterName, message: 'Booking cancelled.' }) };
+      return {
+        data: dto({
+          ...updated,
+          resourceName: current.resourceName,
+          requesterName: current.requesterName,
+          message: 'Booking cancelled.',
+        }),
+      };
     },
 
     async approve(actor: Actor, bookingId: string, version: number) {
@@ -400,20 +599,44 @@ export function createBookingService(db: Database, config: AppConfig) {
       return decide(actor, bookingId, version, 'reject', reason);
     },
 
-    async reschedule(actor: Actor, bookingId: string, input: { startTime: string; endTime: string; version: number }) {
-      if (!actor.roles.includes('admin')) throw new ProblemError(403, 'FORBIDDEN', 'Only an administrator can reschedule a confirmed booking.');
+    async reschedule(
+      actor: Actor,
+      bookingId: string,
+      input: { startTime: string; endTime: string; version: number },
+    ) {
+      if (!actor.roles.includes('admin')) {
+        throw new ProblemError(403, 'FORBIDDEN', 'Only an administrator can reschedule a confirmed booking.');
+      }
       const current = await this.get(actor, bookingId);
-      if (current.status !== 'CONFIRMED') throw new ProblemError(409, 'INVALID_TRANSITION', 'Only a confirmed booking can be rescheduled in place.');
-      if (current.version !== input.version) throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      if (current.status !== 'CONFIRMED') {
+        throw new ProblemError(
+          409,
+          'INVALID_TRANSITION',
+          'Only a confirmed booking can be rescheduled in place.',
+        );
+      }
+      if (current.version !== input.version) {
+        throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+      }
       const start = new Date(input.startTime);
       const end = new Date(input.endTime);
-      const context = await resourceContext(current.resourceId);
-      const department = await getDepartmentSettings(db, config.timezone);
-      const [requester] = await db.select().from(users).where(eq(users.id, current.userId));
+      const context = await resourceContext(current.resourceId, actor.departmentId);
+      const department = await getDepartmentSettings(db, actor.departmentId);
+      const [requester] = await db
+        .select()
+        .from(users)
+        .where(and(eq(users.id, current.userId), eq(users.departmentId, actor.departmentId)));
       if (!requester) throw new ProblemError(404, 'NOT_FOUND', 'Requester not found.');
-      assertPolicy({ ...actor, id: requester.id, userType: requester.userType }, context, start, end, department.timezone);
+      assertPolicy(
+        { ...actor, id: requester.id, userType: requester.userType },
+        context,
+        start,
+        end,
+        department.timezone,
+      );
       const range = toTstzRange(start, occupiedEnd(end, context.resource.bufferMinutes));
       const slotContext = {
+        departmentId: actor.departmentId,
         resourceId: context.resource.id,
         start,
         end,
@@ -423,15 +646,27 @@ export function createBookingService(db: Database, config: AppConfig) {
       };
       try {
         return await db.transaction(async (tx) => {
-          await tx.execute(sql`select id from resources where id = ${context.resource.id} for update`);
-          const [locked] = await tx.select().from(bookings).where(eq(bookings.id, bookingId)).for('update');
+          await tx.execute(
+            sql`select id from resources where id = ${context.resource.id} and department_id = ${actor.departmentId} for update`,
+          );
+          const [locked] = await tx
+            .select()
+            .from(bookings)
+            .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)))
+            .for('update');
           if (!locked || locked.version !== input.version || locked.status !== 'CONFIRMED') {
             throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
           }
           const [updated] = await tx
             .update(bookings)
-            .set({ startTime: start, endTime: end, blockedRange: range, version: locked.version + 1, updatedAt: new Date() })
-            .where(eq(bookings.id, bookingId))
+            .set({
+              startTime: start,
+              endTime: end,
+              blockedRange: range,
+              version: locked.version + 1,
+              updatedAt: new Date(),
+            })
+            .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)))
             .returning();
           await tx.insert(bookingEvents).values({
             bookingId,
@@ -442,6 +677,7 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: {},
           });
           await tx.insert(auditLog).values({
+            departmentId: actor.departmentId,
             actorId: actor.id,
             action: 'booking.rescheduled',
             targetType: 'booking',
@@ -449,11 +685,19 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: { override: true },
           });
           await tx.insert(notifications).values({
+            departmentId: actor.departmentId,
             userId: current.userId,
             type: 'BOOKING_CHANGED',
             payload: { bookingId, resourceName: context.resource.name },
           });
-          return { data: dto({ ...updated, resourceName: context.resource.name, requesterName: current.requesterName, message: 'Booking rescheduled.' }) };
+          return {
+            data: dto({
+              ...updated,
+              resourceName: context.resource.name,
+              requesterName: current.requesterName,
+              message: 'Booking rescheduled.',
+            }),
+          };
         });
       } catch (error) {
         return withSuggestions(error, slotContext);
@@ -462,15 +706,17 @@ export function createBookingService(db: Database, config: AppConfig) {
 
     async get(actor: Actor, bookingId: string): Promise<BookingDto> {
       const [row] = await db
-        .select({
-          booking: bookings,
-          resourceName: resources.name,
-          requesterName: users.fullName,
-        })
+        .select({ booking: bookings, resourceName: resources.name, requesterName: users.fullName })
         .from(bookings)
-        .innerJoin(resources, eq(resources.id, bookings.resourceId))
-        .innerJoin(users, eq(users.id, bookings.userId))
-        .where(eq(bookings.id, bookingId));
+        .innerJoin(
+          resources,
+          and(eq(resources.id, bookings.resourceId), eq(resources.departmentId, actor.departmentId)),
+        )
+        .innerJoin(
+          users,
+          and(eq(users.id, bookings.userId), eq(users.departmentId, actor.departmentId)),
+        )
+        .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)));
       if (!row) throw new ProblemError(404, 'NOT_FOUND', 'Booking not found.');
       const approverRows = await db
         .select({ userId: resourceApprovers.userId })
@@ -487,15 +733,24 @@ export function createBookingService(db: Database, config: AppConfig) {
       actor: Actor,
       query: { page: number; pageSize: number; status?: BookingStatus; resourceId?: string; scope?: string },
     ) {
-      const filters = [];
+      const filters = [eq(bookings.departmentId, actor.departmentId)];
       if (query.status) filters.push(eq(bookings.status, query.status));
       if (query.resourceId) filters.push(eq(bookings.resourceId, query.resourceId));
       if (query.scope === 'all') {
-        if (!actor.roles.includes('admin')) throw new ProblemError(403, 'FORBIDDEN', 'Only an administrator can list every booking.');
+        if (!actor.roles.includes('admin')) {
+          throw new ProblemError(403, 'FORBIDDEN', 'Only an administrator can list every booking.');
+        }
       } else if (query.scope === 'queue') {
         const assigned = await db
           .select({ resourceId: resourceApprovers.resourceId })
           .from(resourceApprovers)
+          .innerJoin(
+            resources,
+            and(
+              eq(resources.id, resourceApprovers.resourceId),
+              eq(resources.departmentId, actor.departmentId),
+            ),
+          )
           .where(eq(resourceApprovers.userId, actor.id));
         const ids = assigned.map((row) => row.resourceId);
         if (actor.roles.includes('admin')) {
@@ -509,19 +764,30 @@ export function createBookingService(db: Database, config: AppConfig) {
       } else {
         filters.push(eq(bookings.userId, actor.id));
       }
-      const where = filters.length ? and(...filters) : undefined;
-      const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(bookings).where(where);
+      const where = and(...filters);
+      const [{ total }] = await db
+        .select({ total: sql<number>`count(*)::int` })
+        .from(bookings)
+        .where(where);
       const rows = await db
         .select({ booking: bookings, resourceName: resources.name, requesterName: users.fullName })
         .from(bookings)
-        .innerJoin(resources, eq(resources.id, bookings.resourceId))
-        .innerJoin(users, eq(users.id, bookings.userId))
+        .innerJoin(
+          resources,
+          and(eq(resources.id, bookings.resourceId), eq(resources.departmentId, actor.departmentId)),
+        )
+        .innerJoin(
+          users,
+          and(eq(users.id, bookings.userId), eq(users.departmentId, actor.departmentId)),
+        )
         .where(where)
         .orderBy(desc(bookings.startTime))
         .limit(query.pageSize)
         .offset((query.page - 1) * query.pageSize);
       return {
-        data: rows.map((row) => dto({ ...row.booking, resourceName: row.resourceName, requesterName: row.requesterName })),
+        data: rows.map((row) =>
+          dto({ ...row.booking, resourceName: row.resourceName, requesterName: row.requesterName }),
+        ),
         page: query.page,
         pageSize: query.pageSize,
         total,
@@ -541,6 +807,13 @@ export function createBookingService(db: Database, config: AppConfig) {
           actorName: users.fullName,
         })
         .from(bookingEvents)
+        .innerJoin(
+          bookings,
+          and(
+            eq(bookings.id, bookingEvents.bookingId),
+            eq(bookings.departmentId, actor.departmentId),
+          ),
+        )
         .leftJoin(users, eq(users.id, bookingEvents.actorId))
         .where(eq(bookingEvents.bookingId, bookingId))
         .orderBy(asc(bookingEvents.createdAt));
@@ -554,29 +827,43 @@ export function createBookingService(db: Database, config: AppConfig) {
     },
 
     async runMaintenance() {
-      const department = await getDepartmentSettings(db, config.timezone);
       const now = new Date();
-      await db.transaction(async (tx) => {
-        const pending = await tx
-          .select()
+      return db.transaction(async (tx) => {
+        const pendingRows = await tx
+          .select({ booking: bookings, pendingExpiryHours: departments.pendingExpiryHours })
           .from(bookings)
+          .innerJoin(departments, eq(departments.id, bookings.departmentId))
           .where(
             and(
               eq(bookings.status, 'PENDING_APPROVAL'),
               or(
                 lte(bookings.startTime, now),
-                sql`${bookings.createdAt} < now() - (${department.pendingExpiryHours} * interval '1 hour')`,
+                sql`${bookings.createdAt} < now() - (${departments.pendingExpiryHours} * interval '1 hour')`,
               ),
             ),
           )
           .limit(50)
           .for('update', { skipLocked: true });
-        for (const booking of pending) {
-          const [resource] = await tx.select({ name: resources.name }).from(resources).where(eq(resources.id, booking.resourceId));
+        for (const { booking } of pendingRows) {
+          const [resource] = await tx
+            .select({ name: resources.name })
+            .from(resources)
+            .where(
+              and(
+                eq(resources.id, booking.resourceId),
+                eq(resources.departmentId, booking.departmentId),
+              ),
+            );
           await tx
             .update(bookings)
             .set({ status: 'EXPIRED', version: booking.version + 1, updatedAt: now })
-            .where(eq(bookings.id, booking.id));
+            .where(
+              and(
+                eq(bookings.id, booking.id),
+                eq(bookings.departmentId, booking.departmentId),
+                eq(bookings.status, 'PENDING_APPROVAL'),
+              ),
+            );
           await tx.insert(bookingEvents).values({
             bookingId: booking.id,
             actorId: null,
@@ -586,6 +873,7 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: {},
           });
           await tx.insert(notifications).values({
+            departmentId: booking.departmentId,
             userId: booking.userId,
             type: 'BOOKING_EXPIRED',
             payload: { bookingId: booking.id, resourceName: resource?.name ?? 'Resource' },
@@ -598,11 +886,25 @@ export function createBookingService(db: Database, config: AppConfig) {
           .limit(50)
           .for('update', { skipLocked: true });
         for (const booking of finished) {
-          const [resource] = await tx.select({ name: resources.name }).from(resources).where(eq(resources.id, booking.resourceId));
+          const [resource] = await tx
+            .select({ name: resources.name })
+            .from(resources)
+            .where(
+              and(
+                eq(resources.id, booking.resourceId),
+                eq(resources.departmentId, booking.departmentId),
+              ),
+            );
           await tx
             .update(bookings)
             .set({ status: 'COMPLETED', version: booking.version + 1, updatedAt: now })
-            .where(eq(bookings.id, booking.id));
+            .where(
+              and(
+                eq(bookings.id, booking.id),
+                eq(bookings.departmentId, booking.departmentId),
+                eq(bookings.status, 'CONFIRMED'),
+              ),
+            );
           await tx.insert(bookingEvents).values({
             bookingId: booking.id,
             actorId: null,
@@ -612,11 +914,13 @@ export function createBookingService(db: Database, config: AppConfig) {
             details: {},
           });
           await tx.insert(notifications).values({
+            departmentId: booking.departmentId,
             userId: booking.userId,
             type: 'BOOKING_COMPLETED',
             payload: { bookingId: booking.id, resourceName: resource?.name ?? 'Resource' },
           });
         }
+        return pendingRows.length + finished.length;
       });
     },
   };
@@ -631,26 +935,37 @@ export function createBookingService(db: Database, config: AppConfig) {
     const [row] = await db
       .select({ booking: bookings, resourceName: resources.name, requesterName: users.fullName })
       .from(bookings)
-      .innerJoin(resources, eq(resources.id, bookings.resourceId))
-      .innerJoin(users, eq(users.id, bookings.userId))
-      .where(eq(bookings.id, bookingId));
+      .innerJoin(
+        resources,
+        and(eq(resources.id, bookings.resourceId), eq(resources.departmentId, actor.departmentId)),
+      )
+      .innerJoin(
+        users,
+        and(eq(users.id, bookings.userId), eq(users.departmentId, actor.departmentId)),
+      )
+      .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)));
     if (!row) throw new ProblemError(404, 'NOT_FOUND', 'Booking not found.');
-    const context = await resourceContext(row.booking.resourceId);
+    const context = await resourceContext(row.booking.resourceId, actor.departmentId);
     if (!canViewBooking(actor, row.booking.userId, context.approverIds)) {
       throw new ProblemError(404, 'NOT_FOUND', 'Booking not found.');
     }
     const permission = canDecide(actor, row.booking.userId, context.approverIds);
     if (!permission.ok) throw new ProblemError(403, 'FORBIDDEN', permission.reason);
-    if (row.booking.version !== version) throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+    if (row.booking.version !== version) {
+      throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
+    }
     let next: BookingStatus;
     try {
       next = transition(row.booking.status, action);
     } catch {
       throw new ProblemError(409, 'INVALID_TRANSITION', 'This request can no longer be decided.');
     }
-    const department = await getDepartmentSettings(db, config.timezone);
+    const department = await getDepartmentSettings(db, actor.departmentId);
     if (action === 'approve') {
-      const [requester] = await db.select().from(users).where(eq(users.id, row.booking.userId));
+      const [requester] = await db
+        .select()
+        .from(users)
+        .where(and(eq(users.id, row.booking.userId), eq(users.departmentId, actor.departmentId)));
       if (!requester) throw new ProblemError(404, 'NOT_FOUND', 'Requester not found.');
       assertPolicy(
         { ...actor, id: requester.id, userType: requester.userType },
@@ -660,8 +975,12 @@ export function createBookingService(db: Database, config: AppConfig) {
         department.timezone,
       );
     }
-    const range = toTstzRange(row.booking.startTime, occupiedEnd(row.booking.endTime, context.resource.bufferMinutes));
+    const range = toTstzRange(
+      row.booking.startTime,
+      occupiedEnd(row.booking.endTime, context.resource.bufferMinutes),
+    );
     const slotContext = {
+      departmentId: actor.departmentId,
       resourceId: context.resource.id,
       start: row.booking.startTime,
       end: row.booking.endTime,
@@ -671,13 +990,22 @@ export function createBookingService(db: Database, config: AppConfig) {
     };
     try {
       return await db.transaction(async (tx) => {
-        await tx.execute(sql`select id from resources where id = ${context.resource.id} for update`);
-        const [locked] = await tx.select().from(bookings).where(eq(bookings.id, bookingId)).for('update');
+        await tx.execute(
+          sql`select id from resources where id = ${context.resource.id} and department_id = ${actor.departmentId} for update`,
+        );
+        const [locked] = await tx
+          .select()
+          .from(bookings)
+          .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)))
+          .for('update');
         if (!locked || locked.version !== version || locked.status !== 'PENDING_APPROVAL') {
           throw new ProblemError(409, 'STALE_VERSION', 'This booking was updated. Reload and try again.');
         }
         if (action === 'approve') {
-          const liveBlocks = await tx.select().from(resourceBlocks).where(eq(resourceBlocks.resourceId, context.resource.id));
+          const liveBlocks = await tx
+            .select()
+            .from(resourceBlocks)
+            .where(eq(resourceBlocks.resourceId, context.resource.id));
           if (
             intervalOverlapsBlock(
               locked.startTime,
@@ -697,7 +1025,7 @@ export function createBookingService(db: Database, config: AppConfig) {
             version: locked.version + 1,
             updatedAt: new Date(),
           })
-          .where(eq(bookings.id, bookingId))
+          .where(and(eq(bookings.id, bookingId), eq(bookings.departmentId, actor.departmentId)))
           .returning();
         await tx.insert(approvals).values({
           bookingId,
@@ -714,6 +1042,7 @@ export function createBookingService(db: Database, config: AppConfig) {
           details: { reason, override: permission.override },
         });
         await tx.insert(auditLog).values({
+          departmentId: actor.departmentId,
           actorId: actor.id,
           action: permission.override ? 'booking.admin_override' : `booking.${action}d`,
           targetType: 'booking',
@@ -721,6 +1050,7 @@ export function createBookingService(db: Database, config: AppConfig) {
           details: { reason, override: permission.override },
         });
         await tx.insert(notifications).values({
+          departmentId: actor.departmentId,
           userId: locked.userId,
           type: action === 'approve' ? 'BOOKING_CONFIRMED' : 'BOOKING_REJECTED',
           payload: { bookingId, resourceName: context.resource.name, reason },
@@ -731,6 +1061,7 @@ export function createBookingService(db: Database, config: AppConfig) {
             .from(bookings)
             .where(
               and(
+                eq(bookings.departmentId, actor.departmentId),
                 eq(bookings.resourceId, context.resource.id),
                 eq(bookings.status, 'PENDING_APPROVAL'),
                 ne(bookings.id, bookingId),
@@ -743,7 +1074,9 @@ export function createBookingService(db: Database, config: AppConfig) {
             await tx
               .update(bookings)
               .set({ status: 'REJECTED', version: other.version + 1, updatedAt: new Date() })
-              .where(eq(bookings.id, other.id));
+              .where(
+                and(eq(bookings.id, other.id), eq(bookings.departmentId, actor.departmentId)),
+              );
             await tx.insert(approvals).values({
               bookingId: other.id,
               approverId: actor.id,
@@ -759,6 +1092,7 @@ export function createBookingService(db: Database, config: AppConfig) {
               details: { reason: 'SLOT_TAKEN' },
             });
             await tx.insert(notifications).values({
+              departmentId: actor.departmentId,
               userId: other.userId,
               type: 'SLOT_TAKEN',
               payload: { bookingId: other.id, resourceName: context.resource.name },
