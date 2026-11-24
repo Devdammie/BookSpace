@@ -1,15 +1,17 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { eq, sql } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import { addDays, getZonedParts, zonedTimeToUtc } from '@bookspace/shared';
 import { loadConfig } from './config.js';
 import { createDatabase, type Database } from './db/client.js';
 import {
   bookings,
+  departments,
   resourceApprovers,
   resourceBlocks,
   resourceHours,
   resources,
+  roles,
   userRoles,
   users,
 } from './db/schema.js';
@@ -38,15 +40,48 @@ export async function seedDatabase(db: Database) {
   if (config.isProduction && process.env.ALLOW_DEMO_SEED !== 'yes') {
     throw new Error('Refusing to load demo accounts in production. Set ALLOW_DEMO_SEED=yes to override.');
   }
+
+  await db
+    .insert(roles)
+    .values([
+      { id: 'member', description: 'Can request and manage their own bookings.' },
+      { id: 'approver', description: 'Can approve bookings for assigned resources.' },
+      { id: 'admin', description: 'Can administer the department.' },
+    ])
+    .onConflictDoNothing();
+
+  const [department] = await db
+    .insert(departments)
+    .values({
+      name: 'Demo Department',
+      slug: 'demo',
+      timezone: config.timezone,
+      isActive: true,
+    })
+    .onConflictDoUpdate({
+      target: departments.slug,
+      set: { timezone: config.timezone, isActive: true },
+    })
+    .returning();
+
   const ids = new Map<string, string>();
   for (const person of Object.values(DEMO_USERS)) {
     const passwordHash = await hashPassword(person.password);
-    const [existing] = await db.select().from(users).where(sql`lower(${users.email}) = ${person.email}`);
+    const [existing] = await db
+      .select()
+      .from(users)
+      .where(
+        and(
+          eq(users.departmentId, department.id),
+          sql`lower(${users.email}) = ${person.email}`,
+        ),
+      );
     let userId = existing?.id;
     if (!userId) {
       const [created] = await db
         .insert(users)
         .values({
+          departmentId: department.id,
           email: person.email,
           fullName: person.fullName,
           userType: person.userType,
@@ -123,14 +158,17 @@ export async function seedDatabase(db: Database) {
 
   const resourceIds = new Map<string, string>();
   for (const item of catalogue) {
-    const [existing] = await db.select().from(resources).where(eq(resources.name, item.name));
+    const [existing] = await db
+      .select()
+      .from(resources)
+      .where(and(eq(resources.departmentId, department.id), eq(resources.name, item.name)));
     if (existing) {
       resourceIds.set(item.name, existing.id);
       continue;
     }
     const [created] = await db
       .insert(resources)
-      .values({ ...item, maxAdvanceDays: 30, parentResourceId: null })
+      .values({ ...item, departmentId: department.id, maxAdvanceDays: 30, parentResourceId: null })
       .returning({ id: resources.id });
     resourceIds.set(item.name, created.id);
   }
@@ -138,7 +176,10 @@ export async function seedDatabase(db: Database) {
   const labId = resourceIds.get('Computer Lab A')!;
   const seminarId = resourceIds.get('Seminar Room B')!;
   const scopeId = resourceIds.get('Oscilloscope 1')!;
-  await db.update(resources).set({ parentResourceId: labId }).where(eq(resources.id, scopeId));
+  await db
+    .update(resources)
+    .set({ parentResourceId: labId })
+    .where(and(eq(resources.id, scopeId), eq(resources.departmentId, department.id)));
 
   for (const resourceId of [labId, seminarId, scopeId, resourceIds.get('Projector 4')!]) {
     const existingHours = await db.select().from(resourceHours).where(eq(resourceHours.resourceId, resourceId));
@@ -179,6 +220,8 @@ export async function seedDatabase(db: Database) {
   const [student] = await db.select().from(users).where(eq(users.id, studentId));
   const actor = {
     id: student.id,
+    departmentId: department.id,
+    departmentSlug: 'demo',
     email: student.email,
     fullName: student.fullName,
     userType: student.userType,
@@ -186,7 +229,11 @@ export async function seedDatabase(db: Database) {
     mustChangePassword: false,
     isActive: true,
   };
-  const existingBookings = await db.select({ id: bookings.id }).from(bookings).limit(1);
+  const existingBookings = await db
+    .select({ id: bookings.id })
+    .from(bookings)
+    .where(eq(bookings.departmentId, department.id))
+    .limit(1);
   if (existingBookings.length === 0) {
     const seminarStart = nextWeekday(config.timezone, 3, '09:00:00');
     await service.create(actor, {
