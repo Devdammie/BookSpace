@@ -45,14 +45,25 @@ npm test
 
 Unit tests always run. API tests against Postgres run only when `DATABASE_URL` is set, so they can use a Neon branch. They are skipped when that variable is absent.
 
-## Production
+## Production / Render
+
+Build and start (single service serving API + built web):
 
 ```bash
+npm install
 npm run build
 NODE_ENV=production SERVE_WEB=true npm start
 ```
 
-Run `npm run db:migrate` with the direct URL before starting the new version. See [docs/operations.md](docs/operations.md).
+On Render use:
+
+- **Build command:** `npm install && npm run build`
+- **Start command:** `npm start`
+- **Env:** `NODE_ENV=production`, `SERVE_WEB=true`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED` (direct), `SESSION_SECRET`, `WEB_ORIGIN` (your Render URL)
+
+Run `npm run db:migrate` with the direct URL before the first start (or from a one-off job). See [docs/operations.md](docs/operations.md).
+
+Vite/TypeScript live in `@bookspace/web` dependencies so production installs still have them for `npm run build`. The API start script uses `tsx`, also kept as a production dependency.
 
 ## Layout
 

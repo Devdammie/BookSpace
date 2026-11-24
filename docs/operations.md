@@ -18,7 +18,8 @@ The API process does not migrate on startup.
 
 - `npm run typecheck` and `npm test` are green. Set `DATABASE_URL` to the staging branch for the API tests.
 - Apply migrations to staging with the direct URL, then to production.
-- Set `SESSION_SECRET`, `WEB_ORIGIN`, `DATABASE_URL` (pooled, `sslmode=require`), and `NODE_ENV=production`.
+- Set `SESSION_SECRET`, `WEB_ORIGIN`, `DATABASE_URL` (pooled, `sslmode=require`), `DATABASE_URL_UNPOOLED`, `SERVE_WEB=true`, and `NODE_ENV=production`.
+- On Render: build `npm install && npm run build`, start `npm start`. Clear the build cache once after dependency moves if install looks too fast / stale.
 - Build the web app and start the API with `SERVE_WEB=true`, or host the static files behind the same origin so the session cookie is first-party.
 - `GET /health` returns ok. `GET /ready` checks the database.
 - Sign in as an administrator that was created with a temporary password, not the demo seed.

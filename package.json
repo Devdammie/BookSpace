@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "Multi-tenant equipment and room booking for university departments.",
   "engines": {
-    "node": ">=22"
+    "node": "22.x"
   },
   "workspaces": [
     "apps/*",
