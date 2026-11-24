@@ -20,6 +20,7 @@ import { createApprovalRouter } from './modules/approvals/routes.js';
 import { createAuthRouter } from './modules/auth/routes.js';
 import { createBookingRouter } from './modules/bookings/routes.js';
 import { createDashboardRouter } from './modules/dashboard/routes.js';
+import { createDepartmentRouter } from './modules/departments/routes.js';
 import { createNotificationRouter } from './modules/notifications/routes.js';
 import { createResourceRouter } from './modules/resources/routes.js';
 import { createUserRouter } from './modules/users/routes.js';
@@ -96,7 +97,7 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
       next(new ProblemError(403, 'FORBIDDEN', 'Request origin is not allowed.'));
       return;
     }
-    if (req.path === '/api/v1/auth/login') {
+    if (req.path === '/api/v1/auth/login' || req.path === '/api/v1/departments') {
       next();
       return;
     }
@@ -112,6 +113,7 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
     next();
   });
 
+  app.use('/api/v1/departments', createDepartmentRouter(db, config));
   app.use('/api/v1/auth', createAuthRouter(db, config));
   app.use('/api/v1/users', createUserRouter(db, config));
   app.use('/api/v1/resources', createResourceRouter(db, config));
