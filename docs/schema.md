@@ -1,19 +1,30 @@
-# Schema
+# Schema notes
 
-Applied by `apps/api/drizzle/0000_init.sql`. The Drizzle definitions in `apps/api/src/db/schema.ts` match these tables.
+Multi-tenant BookSpace uses a shared PostgreSQL database with a `departments` row as the tenant.
 
-- `users`, `roles`, `user_roles` — identity and RBAC. Email uniqueness is `lower(email)`.
-- `resources` — rooms and equipment, soft status (`active`, `maintenance`, `retired`), duration limits, buffer, optional parent resource, allowed user types.
-- `resource_hours` — local opening windows, weekday 0–6.
-- `resource_blocks` — maintenance and closures.
-- `resource_approvers` — who may decide requests for a resource.
-- `bookings` — requester, resource, start, end, `blocked_range` (`tstzrange`, half-open, end includes the buffer), status, purpose, optimistic `version`.
-- `no_overlapping_confirmed` — GiST exclusion constraint on `(resource_id, blocked_range)` where `status = 'CONFIRMED'`. Requires `btree_gist`.
-- `approvals`, `booking_events` — decision record and append-only history.
-- `audit_log` — append-only record of account, resource, settings, and override actions.
-- `notifications` — in-app outbox.
-- `idempotency_keys` — one stored response per user and key.
-- `settings` — `timezone` and `pending_expiry_hours`.
-- `session` — server-side sessions for `connect-pg-simple`.
+## Core tables
 
-Status values: `PENDING_APPROVAL`, `CONFIRMED`, `REJECTED`, `CANCELLED`, `COMPLETED`, `EXPIRED`.
+- `departments` — `id`, unique `slug`, `name`, `timezone`, `pending_expiry_hours`, `is_active`
+- `users` — globally unique email, required `department_id`
+- `resources` — required `department_id`; child hours/blocks/approvers hang off the resource
+- `bookings` — required `department_id`; GiST exclusion `no_overlapping_confirmed` on `(resource_id, blocked_range)` where `status = 'CONFIRMED'`
+- `notifications`, `audit_log`, `idempotency_keys` — required `department_id`
+- `session` — cookie sessions; payload stores `userId`, `departmentId`, `csrfToken`
+
+## Constraints and indexes
+
+- `no_overlapping_confirmed` — GiST exclusion constraint. Requires `btree_gist`.
+- `users_email_lower_idx` — case-insensitive global uniqueness
+- `departments_slug_idx` — unique slug
+- Department indexes on users, resources, bookings, notifications, audit_log, and idempotency keys
+- `idempotency_keys` — one stored response per user and key
+- `booking_events` and `audit_log` reject updates and deletes through triggers
+
+## Status values
+
+`PENDING_APPROVAL`, `CONFIRMED`, `REJECTED`, `CANCELLED`, `COMPLETED`, `EXPIRED`.
+
+## Migrations
+
+- `0000_init` — original single-tenant schema
+- `0001_multitenant` — adds `departments`, backfills slug `demo`, attaches `department_id`, drops global `settings`

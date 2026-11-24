@@ -1,10 +1,12 @@
 # API
 
-Base path `/api/v1`. Session cookie `bookspace.sid`. Mutating requests from a signed-in user send `x-csrf-token` from `GET /auth/csrf` or the login response. Errors use a problem JSON body with `status`, `code`, and `detail`.
+Base path `/api/v1`. Session cookie `bookspace.sid` stores `userId` and `departmentId`. Mutating requests from a signed-in user send `x-csrf-token` from `GET /auth/csrf` or the login response. Errors use a problem JSON body with `status`, `code`, and `detail`. All authenticated data routes are scoped to the session department.
 
 | Method | Path | Access |
 | --- | --- | --- |
-| POST | /auth/login | Public |
+| POST | /departments | Public. Creates a department and its first admin |
+| GET | /departments/:slug | Public. Name, slug, timezone only |
+| POST | /auth/login | Public. Body includes `departmentSlug` |
 | POST | /auth/logout | Signed in |
 | GET | /auth/csrf | Signed in |
 | POST | /auth/change-password | Signed in |
@@ -40,4 +42,4 @@ Base path `/api/v1`. Session cookie `bookspace.sid`. Mutating requests from a si
 | GET, PATCH | /admin/settings | Admin |
 | GET | /health, /ready | Public, not under `/api/v1` |
 
-`POST /bookings` accepts `Idempotency-Key`. A conflict response may include `suggestions`.
+`POST /bookings` accepts `Idempotency-Key`. A conflict response may include `suggestions` that respect the resource buffer and nearby opening windows.

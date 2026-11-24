@@ -1,8 +1,10 @@
 # BookSpace
 
-Equipment and room booking for one department. The API is Express, the database is PostgreSQL on Neon through Drizzle, and the interface is a React app.
+Multi-tenant equipment and room booking for university departments. The API is Express, the database is PostgreSQL on Neon through Drizzle, and the interface is a React app.
 
-Docker is not used. The API is written for Neon. This workspace currently uses a local PostgreSQL 17 cluster on port 5433 so the app can run before Neon URLs are added. Replace `DATABASE_URL` and `DATABASE_URL_UNPOOLED` in `.env` with the Neon pooled and direct URLs when you have them.
+Each department has its own workspace at `/o/:slug/...`. Anyone can create a department at `/signup` and become its first administrator. Isolation is hard: data never crosses department boundaries.
+
+Docker is not used. The API is written for Neon. This workspace can use a local PostgreSQL 17 cluster on port 5433 before Neon URLs are added. Replace `DATABASE_URL` and `DATABASE_URL_UNPOOLED` in `.env` with the Neon pooled and direct URLs when you have them.
 
 ## Setup
 
@@ -20,6 +22,8 @@ npm run dev
 ```
 
 The web app is at http://localhost:5173 and the API is at http://localhost:4000.
+
+Open http://localhost:5173/o/demo/login for the seeded demo department.
 
 Demo accounts created by the seed (development only):
 
@@ -52,7 +56,7 @@ Run `npm run db:migrate` with the direct URL before starting the new version. Se
 
 ## Layout
 
-- `apps/web` — React interface
+- `apps/web` — React interface (`/` landing, `/signup`, `/o/:slug/...`)
 - `apps/api` — HTTP API, Drizzle schema, SQL migrations
 - `packages/shared` — booking rules, Zod contracts, timezone helpers
 - `docs` — decisions, schema, API, wireframes, operations

@@ -36,7 +36,7 @@ Application rollback is redeploying the previous build. Database migrations are 
 
 ## Monitoring
 
-API logs are JSON from pino and include a request id. They do not include cookies or passwords. Watch `maintenance job failed` log lines and HTTP 409/500 rates. The expiry job runs only while the API process is running. Neon's free compute sleeps when idle, so the first request after idle is slower and expiry does not run during sleep.
+API logs are JSON from pino and include a request id. They do not include cookies or passwords. Watch `maintenance job failed` log lines and HTTP 409/500 rates. The expiry job runs catch-up on API boot, uses an in-process overlap guard, drains capped batches each minute, and stops on SIGINT/SIGTERM. Neon's free compute sleeps when idle, so the first request after idle is slower and expiry does not run during sleep.
 
 ## Ongoing
 

@@ -1,19 +1,37 @@
 # Wireframes
 
-## Sign in
+## Landing and signup
 
 ```
 +----------------------------------+
 | BookSpace                        |
+| Create a department  [ Sign up ] |
+| Sign in to demo      [ Demo ]    |
++----------------------------------+
+
++----------------------------------+
+| Create a department              |
+| Name / Slug / Timezone           |
+| Admin name / email / password    |
+| [ Create department ]            |
++----------------------------------+
+```
+
+## Sign in (`/o/:slug/login`)
+
+```
++----------------------------------+
+| BookSpace · {department name}    |
+| Accounts come from an admin      |
 | Email    [________________]      |
 | Password [________________]      |
 | [ Sign in ]                      |
 +----------------------------------+
 ```
 
-A forced password change replaces the app until the temporary password is replaced.
+A forced password change replaces the app until the temporary password is replaced. Confirm the new password before continuing.
 
-## Catalogue and resource
+## Catalogue and resource (`/o/:slug/resources`)
 
 ```
 Search [____] Type [All v] Location [All v]
@@ -34,10 +52,8 @@ Purpose [________________]
 Nearby free slots: [ Use 14:00 ]
 ```
 
-Confirmed, pending, and blocked cells include those words, not color alone.
+Confirmed, pending, and blocked cells include those words, not color alone. Admin management covers policy, hours, blocks, and approvers on the same page.
 
 ## Queue and admin
 
-The approval queue is one card per request with Approve and Reject. Reject needs a reason.
-
-Admin tabs: resources, users, reports, audit, settings. Creating a user shows the temporary password once. Cancelling a confirmed booking asks for a second confirmation.
+Approvers see pending requests for assigned resources. Admins manage users (edit, roles, activate), resources, reports with filters/CSV, audit history, and department timezone settings.
