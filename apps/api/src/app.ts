@@ -11,7 +11,7 @@ import { pinoHttp } from 'pino-http';
 import pino from 'pino';
 import type pg from 'pg';
 import './types.js';
-import type { AppConfig } from './config.js';
+import { isAllowedOrigin, type AppConfig } from './config.js';
 import type { Database } from './db/client.js';
 import { ProblemError, pgCode } from './http/errors.js';
 import { tokensMatch } from './modules/auth/passwords.js';
@@ -21,6 +21,7 @@ import { createAuthRouter } from './modules/auth/routes.js';
 import { createBookingRouter } from './modules/bookings/routes.js';
 import { createDashboardRouter } from './modules/dashboard/routes.js';
 import { createDepartmentRouter } from './modules/departments/routes.js';
+import { createInternalRouter } from './modules/internal/routes.js';
 import { createNotificationRouter } from './modules/notifications/routes.js';
 import { createResourceRouter } from './modules/resources/routes.js';
 import { createUserRouter } from './modules/users/routes.js';
@@ -36,7 +37,14 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
   const logger = pino({ level: config.isTest ? 'silent' : 'info' });
   app.use(pinoHttp({ logger, redact: ['req.headers.cookie', 'req.headers.authorization', 'res.headers["set-cookie"]'] }));
   app.use(helmet());
-  app.use(cors({ origin: config.webOrigin, credentials: true }));
+  app.use(
+    cors({
+      origin(origin, callback) {
+        callback(null, isAllowedOrigin(origin, config));
+      },
+      credentials: true,
+    }),
+  );
   app.use(express.json({ limit: '100kb' }));
 
   app.get('/health', (_req, res) => {
@@ -93,11 +101,15 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
       return;
     }
     const origin = req.header('origin');
-    if (origin && origin !== config.webOrigin) {
+    if (origin && !isAllowedOrigin(origin, config)) {
       next(new ProblemError(403, 'FORBIDDEN', 'Request origin is not allowed.'));
       return;
     }
-    if (req.path === '/api/v1/auth/login' || req.path === '/api/v1/departments') {
+    if (
+      req.path === '/api/v1/auth/login' ||
+      req.path === '/api/v1/departments' ||
+      req.path === '/api/v1/internal/maintenance'
+    ) {
       next();
       return;
     }
@@ -113,6 +125,7 @@ export function createApp(deps: { db: Database; pool: pg.Pool; config: AppConfig
     next();
   });
 
+  app.use('/api/v1/internal', createInternalRouter(db, config));
   app.use('/api/v1/departments', createDepartmentRouter(db, config));
   app.use('/api/v1/auth', createAuthRouter(db, config));
   app.use('/api/v1/users', createUserRouter(db, config));
