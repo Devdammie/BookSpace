@@ -14,13 +14,61 @@ The command refuses a host that contains `-pooler`, because migration locks need
 
 The API process does not migrate on startup.
 
+## Vercel (recommended multi-service)
+
+The repo root [`vercel.json`](../vercel.json) defines two services:
+
+| Service | Root | Public paths |
+| --- | --- | --- |
+| `api` | `apps/api` | `/api/*`, `/health`, `/ready`, `/openapi.yaml` |
+| `web` | `apps/web` | everything else (`/(.*)`) |
+
+No service bindings: the browser talks to the API on the same domain via relative `/api/v1/...` URLs.
+
+### Project setup
+
+1. Import the GitHub repo into Vercel with **root directory = repository root** (where `vercel.json` lives).
+2. Set environment variables for Production (and Preview if used):
+
+| Variable | Notes |
+| --- | --- |
+| `DATABASE_URL` | Neon pooled URL, `sslmode=require` |
+| `DATABASE_URL_UNPOOLED` | Neon direct URL (migrations) |
+| `SESSION_SECRET` | ≥16 random characters |
+| `WEB_ORIGIN` | Exact site origin, e.g. `https://your-app.vercel.app` |
+| `CRON_SECRET` | Random secret; Vercel Cron sends `Authorization: Bearer …` |
+| `SERVE_WEB` | `false` |
+| `DEPARTMENT_TIMEZONE` | Optional, default `America/Los_Angeles` |
+
+3. Deploy with Git push or `npx vercel --prod`.
+4. Run `npm run db:migrate` against Neon before first traffic.
+5. Confirm `/health`, `/`, `/signup`, and a booking flow.
+
+### Maintenance cron
+
+`vercel.json` schedules `POST /api/v1/internal/maintenance` every minute. That route drains expiry/completion batches. Minute crons require a Vercel plan that allows them (Pro+). On Hobby, change the schedule to daily/hourly or run maintenance elsewhere.
+
+In-process `node-cron` is **disabled** when `VERCEL=1`. Local and Render still use the in-process scheduler unless `ENABLE_IN_PROCESS_SCHEDULER=false`.
+
+### Local multi-service
+
+```bash
+npx vercel dev
+```
+
+## Render (single process)
+
+- Build: `npm install && npm run build`
+- Start: `npm start`
+- Env: `SERVE_WEB=true`, plus the same database/session variables as above
+- Clear the build cache once if install looks stale after dependency moves
+
 ## Release checklist
 
 - `npm run typecheck` and `npm test` are green. Set `DATABASE_URL` to the staging branch for the API tests.
 - Apply migrations to staging with the direct URL, then to production.
-- Set `SESSION_SECRET`, `WEB_ORIGIN`, `DATABASE_URL` (pooled, `sslmode=require`), `DATABASE_URL_UNPOOLED`, `SERVE_WEB=true`, and `NODE_ENV=production`.
-- On Render: build `npm install && npm run build`, start `npm start`. Clear the build cache once after dependency moves if install looks too fast / stale.
-- Build the web app and start the API with `SERVE_WEB=true`, or host the static files behind the same origin so the session cookie is first-party.
+- Set `SESSION_SECRET`, `WEB_ORIGIN`, `DATABASE_URL` (pooled, `sslmode=require`), `DATABASE_URL_UNPOOLED`, and `NODE_ENV=production`.
+- On Vercel set `SERVE_WEB=false` and `CRON_SECRET`. On Render set `SERVE_WEB=true`.
 - `GET /health` returns ok. `GET /ready` checks the database.
 - Sign in as an administrator that was created with a temporary password, not the demo seed.
 - Book the same slot twice on staging and confirm one request wins.
@@ -37,7 +85,7 @@ Application rollback is redeploying the previous build. Database migrations are 
 
 ## Monitoring
 
-API logs are JSON from pino and include a request id. They do not include cookies or passwords. Watch `maintenance job failed` log lines and HTTP 409/500 rates. The expiry job runs catch-up on API boot, uses an in-process overlap guard, drains capped batches each minute, and stops on SIGINT/SIGTERM. Neon's free compute sleeps when idle, so the first request after idle is slower and expiry does not run during sleep.
+API logs are JSON from pino and include a request id. They do not include cookies or passwords. Watch `maintenance job failed` log lines, cron `401`/`503` on `/api/v1/internal/maintenance`, and HTTP 409/500 rates. Neon's free compute sleeps when idle, so the first request after idle is slower.
 
 ## Ongoing
 

@@ -40,6 +40,9 @@ Base path `/api/v1`. Session cookie `bookspace.sid` stores `userId` and `departm
 | GET | /admin/reports/bookings.csv | Approver or admin |
 | GET | /admin/audit | Admin |
 | GET, PATCH | /admin/settings | Admin |
+| POST | /internal/maintenance | Cron only. `Authorization: Bearer $CRON_SECRET` |
 | GET | /health, /ready | Public, not under `/api/v1` |
 
 `POST /bookings` accepts `Idempotency-Key`. A conflict response may include `suggestions` that respect the resource buffer and nearby opening windows.
+
+On Vercel, public traffic reaches the API through top-level rewrites (`/api/*`, `/health`, `/ready`, `/openapi.yaml`). The SPA stays on the same origin and keeps using relative `/api/v1/...` URLs. There are no service bindings because the browser calls the API directly.

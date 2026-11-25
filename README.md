@@ -45,9 +45,20 @@ npm test
 
 Unit tests always run. API tests against Postgres run only when `DATABASE_URL` is set, so they can use a Neon branch. They are skipped when that variable is absent.
 
-## Production / Render
+## Production
 
-Build and start (single service serving API + built web):
+### Vercel (recommended)
+
+Root [`vercel.json`](vercel.json) deploys two services (`api` + `web`) on one domain:
+
+1. Import the repo in Vercel with **root = repository root**.
+2. Set env: `DATABASE_URL`, `DATABASE_URL_UNPOOLED`, `SESSION_SECRET`, `WEB_ORIGIN`, `CRON_SECRET`, `SERVE_WEB=false`.
+3. Deploy (`npx vercel --prod` or Git push).
+4. Run `npm run db:migrate` against Neon before first use.
+
+Local multi-service: `npx vercel dev`. Details in [docs/operations.md](docs/operations.md).
+
+### Render (single process)
 
 ```bash
 npm install
@@ -55,15 +66,9 @@ npm run build
 NODE_ENV=production SERVE_WEB=true npm start
 ```
 
-On Render use:
+Env: `SERVE_WEB=true`, pooled/direct DB URLs, `SESSION_SECRET`, `WEB_ORIGIN`.
 
-- **Build command:** `npm install && npm run build`
-- **Start command:** `npm start`
-- **Env:** `NODE_ENV=production`, `SERVE_WEB=true`, `DATABASE_URL` (pooled), `DATABASE_URL_UNPOOLED` (direct), `SESSION_SECRET`, `WEB_ORIGIN` (your Render URL)
-
-Run `npm run db:migrate` with the direct URL before the first start (or from a one-off job). See [docs/operations.md](docs/operations.md).
-
-Vite/TypeScript live in `@bookspace/web` dependencies so production installs still have them for `npm run build`. The API start script uses `tsx`, also kept as a production dependency.
+Vite/TypeScript are production dependencies of `@bookspace/web` so installs used for `npm run build` keep them. The API uses `tsx` as a production dependency.
 
 ## Layout
 
