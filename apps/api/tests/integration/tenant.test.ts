@@ -164,4 +164,18 @@ suite('tenant isolation', () => {
     });
     expect(response.status).toBe(401);
   });
+
+  it('protects the maintenance cron route with CRON_SECRET', async () => {
+    process.env.CRON_SECRET = 'test-cron-secret-value';
+    resetConfigForTests();
+    const config = loadConfig();
+    const secured = createApp({ db, pool, config }).app;
+    const denied = await request(secured).post('/api/v1/internal/maintenance');
+    expect(denied.status).toBe(401);
+    const allowed = await request(secured)
+      .post('/api/v1/internal/maintenance')
+      .set('authorization', 'Bearer test-cron-secret-value');
+    expect(allowed.status).toBe(200);
+    expect(allowed.body.data.ok).toBe(true);
+  });
 });
