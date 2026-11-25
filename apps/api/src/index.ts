@@ -18,26 +18,35 @@ pool.on('error', (error) => {
   console.error('Postgres pool error', error);
 });
 const { app, logger } = createApp({ db, pool, config });
-const scheduler = startScheduler(db, config, {
-  error: (error) => logger.error({ err: error }, 'maintenance job failed'),
-});
 
-const server = app.listen(config.port, () => {
-  logger.info({ port: config.port }, 'BookSpace API listening');
-});
+// Vercel Fluid/Express loads this module and uses the default export.
+// Long-lived listen + in-process cron are for local/Render only.
+export default app;
 
-let shuttingDown = false;
-async function shutdown() {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  await scheduler.stop();
-  server.close(() => {
-    void pool.end().finally(() => process.exit(0));
+if (!config.isVercel) {
+  const scheduler = config.enableInProcessScheduler
+    ? startScheduler(db, config, {
+        error: (error) => logger.error({ err: error }, 'maintenance job failed'),
+      })
+    : null;
+
+  const server = app.listen(config.port, () => {
+    logger.info({ port: config.port, serveWeb: config.serveWeb }, 'BookSpace API listening');
   });
-}
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
-  process.on(signal, () => {
-    void shutdown();
-  });
+  let shuttingDown = false;
+  async function shutdown() {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    if (scheduler) await scheduler.stop();
+    server.close(() => {
+      void pool.end().finally(() => process.exit(0));
+    });
+  }
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.on(signal, () => {
+      void shutdown();
+    });
+  }
 }
